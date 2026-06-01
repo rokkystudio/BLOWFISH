@@ -1,0 +1,5 @@
+#include "app_resource.h"
+
+IDI_APP_ICON ICON "../resources/icons/app.ico"
+IDI_ENCRYPT_ICON ICON "../resources/icons/encrypt.ico"
+IDI_DECRYPT_ICON ICON "../resources/icons/decrypt.ico"

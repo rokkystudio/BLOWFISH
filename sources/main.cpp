@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <shellapi.h>
 
+#include "app_resource.h"
+
 #include <cryptopp/blowfish.h>
 #include <cryptopp/cryptlib.h>
 #include <cryptopp/filters.h>
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cwctype>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -43,6 +46,10 @@ namespace
     constexpr std::size_t HmacSize = CryptoPP::SHA256::DIGESTSIZE;
     constexpr std::size_t HeaderSize = FileMagic.size() + sizeof(std::uint32_t) + SaltSize + IvSize;
     constexpr std::size_t BufferSize = 64 * 1024;
+    constexpr std::array<Byte, SaltSize> FixedKdfSalt = {
+        0x42, 0x6C, 0x6F, 0x77, 0x66, 0x69, 0x73, 0x68,
+        0x2D, 0x46, 0x69, 0x78, 0x65, 0x64, 0x2D, 0x53
+    };
 
     constexpr int KeyEditId = 1001;
     constexpr int FileStaticId = 1002;
@@ -86,6 +93,12 @@ namespace
         std::wstring password;
         HWND editHandle = nullptr;
         bool accepted = false;
+    };
+
+    class UsageError : public std::runtime_error
+    {
+    public:
+        using std::runtime_error::runtime_error;
     };
 
     /**
@@ -206,7 +219,7 @@ namespace
     }
 
     /**
-     * Возвращает заголовок файла BlowfishTool.
+     * Возвращает заголовок файла Blowfish.
      */
     std::vector<Byte> buildHeader(
         std::uint32_t iterations,
@@ -240,7 +253,7 @@ namespace
     }
 
     /**
-     * Читает и проверяет заголовок файла BlowfishTool.
+     * Читает и проверяет заголовок файла Blowfish.
      */
     FileHeader readHeader(std::ifstream& input)
     {
@@ -270,7 +283,7 @@ namespace
     }
 
     /**
-     * Читает заголовок файла BlowfishTool из указанного пути.
+     * Читает заголовок файла Blowfish из указанного пути.
      */
     FileHeader readHeaderFromFile(const fs::path& inputPath)
     {
@@ -327,6 +340,16 @@ namespace
     {
         SecureZeroMemory(material.cipherKey.data(), material.cipherKey.size());
         SecureZeroMemory(material.hmacKey.data(), material.hmacKey.size());
+    }
+
+    /**
+     * Производит IV из уже полученного ключевого материала.
+     */
+    std::array<Byte, IvSize> deriveIvFromKeyMaterial(const KeyMaterial& material)
+    {
+        std::array<Byte, IvSize> iv = {};
+        std::copy_n(material.hmacKey.begin(), iv.size(), iv.begin());
+        return iv;
     }
 
     /**
@@ -592,9 +615,8 @@ namespace
 
         const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
 
-        auto salt = randomBytes<SaltSize>();
-        auto iv = randomBytes<IvSize>();
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, salt, KdfIterations);
+        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
+        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
 
         try
         {
@@ -610,18 +632,13 @@ namespace
                 throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
             }
 
-            const std::vector<Byte> header = buildHeader(KdfIterations, salt, iv);
-            HmacSha256 hmac(keyMaterial.hmacKey);
-            hmac.update(header.data(), header.size());
-            writeBytes(output, header.data(), header.size());
-
-            CryptoPP::CBC_Mode<CryptoPP::Blowfish>::Encryption encryption;
+            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Encryption encryption;
             encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
 
             CryptoPP::StreamTransformationFilter filter(
                 encryption,
                 nullptr,
-                CryptoPP::StreamTransformationFilter::PKCS_PADDING);
+                CryptoPP::StreamTransformationFilter::NO_PADDING);
 
             std::array<Byte, BufferSize> inputBuffer = {};
 
@@ -633,7 +650,7 @@ namespace
                 if (readSize > 0)
                 {
                     filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
-                    drainFilter(filter, output, &hmac);
+                    drainFilter(filter, output, nullptr);
                 }
 
                 if (input.eof())
@@ -648,10 +665,7 @@ namespace
             }
 
             filter.MessageEnd();
-            drainFilter(filter, output, &hmac);
-
-            const auto hmacValue = hmac.final();
-            writeBytes(output, hmacValue.data(), hmacValue.size());
+            drainFilter(filter, output, nullptr);
 
             output.close();
             if (!output)
@@ -671,7 +685,7 @@ namespace
     }
 
     /**
-     * Расшифровывает файл BlowfishTool после проверки HMAC-SHA256.
+     * Расшифровывает файл Blowfish после проверки HMAC-SHA256.
      */
     void decryptFile(
         const fs::path& inputPath,
@@ -680,45 +694,16 @@ namespace
         bool force)
     {
         validateFilePaths(inputPath, outputPath, force);
-
-        std::error_code error;
-        const std::uintmax_t fileSize = fs::file_size(inputPath, error);
-        if (error)
-        {
-            throw std::runtime_error("Cannot read input file size " + quotePath(inputPath));
-        }
-
-        if (fileSize < HeaderSize + HmacSize)
-        {
-            throw std::runtime_error("Input file is too small for BlowfishTool format");
-        }
-
-        const FileHeader header = readHeaderFromFile(inputPath);
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, header.salt, header.iterations);
-        const std::uintmax_t authenticatedSize = fileSize - HmacSize;
-        const std::uintmax_t cipherTextSize = fileSize - HeaderSize - HmacSize;
+        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
+        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
         const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
 
         try
         {
-            const auto computedHmac = computeFilePrefixHmac(inputPath, authenticatedSize, keyMaterial.hmacKey);
-            const auto storedHmac = readStoredHmac(inputPath, authenticatedSize);
-
-            if (!hmacEquals(computedHmac, storedHmac))
-            {
-                throw std::runtime_error("Key is incorrect or input file is corrupted");
-            }
-
             std::ifstream input(inputPath, std::ios::binary);
             if (!input)
             {
                 throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
-            }
-
-            input.seekg(static_cast<std::streamoff>(HeaderSize), std::ios::beg);
-            if (!input)
-            {
-                throw std::runtime_error("Cannot seek to ciphertext in input file");
             }
 
             std::ofstream output(temporaryPath, std::ios::binary);
@@ -727,31 +712,36 @@ namespace
                 throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
             }
 
-            CryptoPP::CBC_Mode<CryptoPP::Blowfish>::Decryption decryption;
-            decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), header.iv.data(), header.iv.size());
+            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Decryption decryption;
+            decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
 
             CryptoPP::StreamTransformationFilter filter(
                 decryption,
                 nullptr,
-                CryptoPP::StreamTransformationFilter::PKCS_PADDING);
+                CryptoPP::StreamTransformationFilter::NO_PADDING);
 
             std::array<Byte, BufferSize> inputBuffer = {};
-            std::uintmax_t remainingSize = cipherTextSize;
 
-            while (remainingSize > 0)
+            for (;;)
             {
-                const std::size_t chunkSize = static_cast<std::size_t>(std::min<std::uintmax_t>(remainingSize, inputBuffer.size()));
-                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(chunkSize));
+                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(inputBuffer.size()));
+                const std::streamsize readSize = input.gcount();
 
-                if (input.gcount() != static_cast<std::streamsize>(chunkSize))
+                if (readSize > 0)
                 {
-                    throw std::runtime_error("Cannot read ciphertext from input file");
+                    filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
+                    drainFilter(filter, output, nullptr);
                 }
 
-                filter.Put(inputBuffer.data(), chunkSize);
-                drainFilter(filter, output, nullptr);
+                if (input.eof())
+                {
+                    break;
+                }
 
-                remainingSize -= chunkSize;
+                if (!input)
+                {
+                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
+                }
             }
 
             filter.MessageEnd();
@@ -781,7 +771,7 @@ namespace
     {
         if (options.mode != Mode::None && options.mode != mode)
         {
-            throw std::runtime_error("Only one mode can be specified");
+            throw UsageError("Only one mode can be specified");
         }
 
         options.mode = mode;
@@ -794,7 +784,7 @@ namespace
     {
         if (index + 1 >= argc)
         {
-            throw std::runtime_error("Missing value for " + toUtf8(optionName));
+            throw UsageError("Missing value for " + toUtf8(optionName));
         }
 
         ++index;
@@ -858,7 +848,7 @@ namespace
             }
             else
             {
-                throw std::runtime_error("Unknown argument " + toUtf8(argument));
+                throw UsageError("Unknown argument " + toUtf8(argument));
             }
         }
 
@@ -871,14 +861,21 @@ namespace
     void printHelp()
     {
         std::wcout
-            << L"BlowfishTool\n\n"
+            << L"Blowfish\n\n"
             << L"Шифрование:\n"
-            << L"  BlowfishTool.exe --encrypt --input <file> --output <file.bfw> --ask-key\n"
-            << L"  BlowfishTool.exe --encrypt -i <file> -o <file.bfw> -k <key>\n\n"
+            << L"  Blowfish.exe --encrypt --input <file> --ask-key\n"
+            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n\n"
             << L"Расшифрование:\n"
-            << L"  BlowfishTool.exe --decrypt --input <file.bfw> --output <file> --ask-key\n"
-            << L"  BlowfishTool.exe --decrypt -i <file.bfw> -o <file> -k <key>\n\n"
+            << L"  Blowfish.exe --decrypt --input <file> --ask-key\n"
+            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n\n"
+            << L"Выходной файл по умолчанию (если не указан --output):\n"
+            << L"  encrypt + .zip  -> .pack\n"
+            << L"  decrypt + .pack -> .zip\n"
+            << L"  encrypt         -> <input>.bf\n"
+            << L"  decrypt + .bf   -> убрать .bf\n"
+            << L"  decrypt         -> <input>.ubf\n\n"
             << L"Параметры:\n"
+            << L"  --output    путь выходного файла (необязательно)\n"
             << L"  --force     перезаписывает существующий выходной файл\n"
             << L"  --ask-key   запрашивает ключ в консоли без вывода символов\n"
             << L"  --key       принимает ключ из аргумента командной строки\n"
@@ -1056,15 +1053,19 @@ namespace
      */
     void registerKeyDialogClass()
     {
-        const wchar_t* className = L"BlowfishToolKeyDialog";
+        const wchar_t* className = L"BlowfishKeyDialog";
+        HINSTANCE instanceHandle = GetModuleHandleW(nullptr);
+        HICON appIcon = LoadIconW(instanceHandle, MAKEINTRESOURCEW(IDI_APP_ICON));
 
         WNDCLASSEXW windowClass = {};
         windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = keyDialogProc;
-        windowClass.hInstance = GetModuleHandleW(nullptr);
-        windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        windowClass.hInstance = instanceHandle;
+        windowClass.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
         windowClass.lpszClassName = className;
+        windowClass.hIcon = appIcon;
+        windowClass.hIconSm = appIcon;
 
         if (RegisterClassExW(&windowClass) == 0)
         {
@@ -1097,7 +1098,7 @@ namespace
 
         HWND windowHandle = CreateWindowExW(
             WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
-            L"BlowfishToolKeyDialog",
+            L"BlowfishKeyDialog",
             title.c_str(),
             WS_CAPTION | WS_SYSMENU,
             x,
@@ -1112,6 +1113,13 @@ namespace
         if (windowHandle == nullptr)
         {
             throw std::runtime_error("Cannot create key dialog");
+        }
+
+        HICON appIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_APP_ICON));
+        if (appIcon != nullptr)
+        {
+            SendMessageW(windowHandle, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(appIcon));
+            SendMessageW(windowHandle, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(appIcon));
         }
 
         setDefaultGuiFont(windowHandle);
@@ -1142,22 +1150,61 @@ namespace
         return false;
     }
 
-    /**
-     * Возвращает выходной путь для запуска из контекстного меню.
-     */
-    fs::path makeShellOutputPath(const fs::path& inputPath, Mode mode)
+    std::wstring toLower(std::wstring value)
     {
-        fs::path outputPath = inputPath;
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](const wchar_t symbol)
+            {
+                return static_cast<wchar_t>(std::towlower(symbol));
+            });
+
+        return value;
+    }
+
+    bool extensionEquals(const fs::path& path, std::wstring_view extension)
+    {
+        return toLower(path.extension().wstring()) == toLower(std::wstring(extension));
+    }
+
+    /**
+     * Возвращает выходной путь по умолчанию, если --output не указан.
+     */
+    fs::path makeAutomaticOutputPath(const fs::path& inputPath, Mode mode)
+    {
+        auto replaceExtension = [&](std::wstring_view extension)
+        {
+            fs::path outputPath = inputPath;
+            outputPath.replace_extension(extension);
+            return outputPath;
+        };
 
         if (mode == Mode::Encrypt)
         {
-            outputPath += L".bfw";
-        }
-        else
-        {
-            outputPath += L".plain";
+            if (extensionEquals(inputPath, L".zip"))
+            {
+                return replaceExtension(L".pack");
+            }
+
+            fs::path outputPath = inputPath;
+            outputPath += L".bf";
+            return outputPath;
         }
 
+        if (extensionEquals(inputPath, L".pack"))
+        {
+            return replaceExtension(L".zip");
+        }
+
+        if (extensionEquals(inputPath, L".bf"))
+        {
+            return replaceExtension(L"");
+        }
+
+        fs::path outputPath = inputPath;
+        outputPath += L".ubf";
         return outputPath;
     }
 
@@ -1166,7 +1213,7 @@ namespace
      */
     void showErrorMessage(const std::wstring& message)
     {
-        MessageBoxW(nullptr, message.c_str(), L"BlowfishTool", MB_OK | MB_ICONERROR);
+        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONERROR);
     }
 
     /**
@@ -1179,7 +1226,7 @@ namespace
         message += L"\n\nВыход:\n";
         message += outputPath.wstring();
 
-        MessageBoxW(nullptr, message.c_str(), L"BlowfishTool", MB_OK | MB_ICONINFORMATION);
+        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONINFORMATION);
     }
 
     /**
@@ -1187,7 +1234,7 @@ namespace
      */
     int executeShellMode(const Options& options)
     {
-        const fs::path outputPath = makeShellOutputPath(options.inputPath, options.mode);
+        const fs::path outputPath = makeAutomaticOutputPath(options.inputPath, options.mode);
 
         std::wstring password;
         const std::wstring title = options.mode == Mode::Encrypt
@@ -1221,7 +1268,7 @@ namespace
     {
         if (options.outputPath.empty())
         {
-            throw std::runtime_error("Output path is required in console mode");
+            options.outputPath = makeAutomaticOutputPath(options.inputPath, options.mode);
         }
 
         if (options.password.empty() && options.askKey)
@@ -1231,7 +1278,7 @@ namespace
 
         if (options.password.empty())
         {
-            throw std::runtime_error("Key is required. Use --ask-key or --key <value>");
+            throw UsageError("Key is required. Use --ask-key or --key <value>");
         }
 
         if (options.mode == Mode::Encrypt)
@@ -1262,12 +1309,12 @@ namespace
 
         if (options.mode == Mode::None)
         {
-            throw std::runtime_error("Mode is required: --encrypt or --decrypt");
+            throw UsageError("Mode is required: --encrypt or --decrypt");
         }
 
         if (options.inputPath.empty())
         {
-            throw std::runtime_error("Input path is required");
+            throw UsageError("Input path is required");
         }
 
         if (options.shellMode)
@@ -1280,7 +1327,7 @@ namespace
 }
 
 /**
- * Точка входа приложения BlowfishTool.
+ * Точка входа приложения Blowfish.
  */
 int wmain(int argc, wchar_t** argv)
 {
@@ -1292,6 +1339,20 @@ int wmain(int argc, wchar_t** argv)
     {
         options = parseOptions(argc, argv);
         return execute(options);
+    }
+    catch (const UsageError& exception)
+    {
+        if (options.shellMode)
+        {
+            showErrorMessage(fromUtf8(exception.what()));
+        }
+        else
+        {
+            std::cerr << "Ошибка: " << exception.what() << "\n\n";
+            printHelp();
+        }
+
+        return 1;
     }
     catch (const std::exception& exception)
     {

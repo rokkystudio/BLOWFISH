@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace blowfish_tool
+namespace blowfish
 {
     using Byte = std::uint8_t;
 }

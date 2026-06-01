@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <string_view>
 
-namespace blowfish_tool
+namespace blowfish
 {
     namespace
     {

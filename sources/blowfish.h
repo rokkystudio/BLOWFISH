@@ -7,7 +7,7 @@
 #include <cstdint>
 #include <span>
 
-namespace blowfish_tool
+namespace blowfish
 {
     /**
      * Реализует блочный шифр Blowfish с 16 раундами и 64-битным блоком.
