@@ -301,7 +301,7 @@ public:
 	//LCOV_EXCL_START
 	CRYPTOPP_INHERIT_ALLOCATOR_TYPES(T)
 
-	// TODO: should this return NULL or throw bad_alloc? Non-Windows C++ standard
+	// NOTE: should this return NULL or throw bad_alloc? Non-Windows C++ standard
 	// libraries always throw. And late mode Windows throws. Early model Windows
 	// (circa VC++ 6.0) returned NULL.
 	pointer allocate(size_type n, const void* unused = NULLPTR)

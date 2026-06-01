@@ -1563,7 +1563,7 @@ public:
 	/// \return maximum recoverable length based on signature length, in bytes
 	/// \details this function is not implemented and always returns 0.
 	size_t MaxRecoverableLengthFromSignatureLength(size_t signatureLength) const
-		{CRYPTOPP_UNUSED(signatureLength); CRYPTOPP_ASSERT(false); return 0;}	// TODO
+		{CRYPTOPP_UNUSED(signatureLength); CRYPTOPP_ASSERT(false); return 0;}	// NOTE
 
 	/// \brief Determines if the scheme is probabilistic
 	/// \return true if the scheme is probabilistic, false otherwise
@@ -1949,7 +1949,7 @@ struct DL_CryptoSchemeOptions : public DL_KeyedSchemeOptions<T1, T2>
 };
 
 /// \brief Discrete Log (DL) base object implementation
-/// \tparam BASE TODO
+/// \tparam BASE NOTE
 /// \tparam SCHEME_OPTIONS options for the scheme
 /// \tparam KEY key used in the scheme
 template <class BASE, class SCHEME_OPTIONS, class KEY>
@@ -1989,7 +1989,7 @@ private:
 };
 
 /// \brief Discrete Log (DL) object implementation
-/// \tparam BASE TODO
+/// \tparam BASE NOTE
 /// \tparam SCHEME_OPTIONS options for the scheme
 /// \tparam KEY key used in the scheme
 template <class BASE, class SCHEME_OPTIONS, class KEY>

@@ -2308,7 +2308,7 @@ inline word64 ByteReverse(word64 value)
 /// \since Crypto++ 8.7
 inline word128 ByteReverse(word128 value)
 {
-	// TODO: speed this up
+	// NOTE: speed this up
 	return (word128(ByteReverse(word64(value))) << 64) | ByteReverse(word64(value>>64));
 }
 #endif

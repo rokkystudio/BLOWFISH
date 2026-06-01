@@ -68,7 +68,7 @@ public:
 	std::string AlgorithmProvider() const;
 
 protected:
-	// TODO: No longer needed. Remove at next major version bump
+	// NOTE: No longer needed. Remove at next major version bump
 	void HashBlocks(const byte *input, size_t length, word32 padbit);
 	void HashFinal(byte *mac, size_t length);
 

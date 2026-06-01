@@ -3,7 +3,7 @@
 #include "pch.h"
 #include "config.h"
 
-// TODO: fix the C4589 warnings
+// NOTE: fix the C4589 warnings
 #if CRYPTOPP_MSC_VERSION
 # pragma warning(disable: 4589)
 #endif

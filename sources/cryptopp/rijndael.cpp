@@ -426,7 +426,7 @@ void Rijndael::Base::UncheckedSetKey(const byte *userKey, unsigned int keyLen, c
 	// MSVC 2008 SP1 generates bad code for _mm_extract_epi32() when compiling for X64
 	if (HasAESNI() && HasSSE41())
 	{
-		// TODO: Add non-SSE4.1 variant for low-end Atoms. The low-end
+		// NOTE: Add non-SSE4.1 variant for low-end Atoms. The low-end
 		//  Atoms have SSE2-SSSE3 and AES-NI, but not SSE4.1 or SSE4.2.
 		Rijndael_UncheckedSetKey_SSE4_AESNI(userKey, keyLen, rk);
 		if (!IsForwardTransformation())

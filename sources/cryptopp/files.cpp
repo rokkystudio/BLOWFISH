@@ -170,7 +170,7 @@ size_t FileStore::CopyRangeTo2(BufferedTransformation &target, lword &begin, lwo
 		}
 	}
 
-	// TODO: figure out what happens on cin
+	// NOTE: figure out what happens on cin
 	std::streampos current = m_stream->tellg();
 	std::streampos endPosition = m_stream->seekg(0, std::ios::end).tellg();
 	std::streampos newPosition = current + static_cast<std::streamoff>(begin);

@@ -613,7 +613,7 @@ struct ECIES
 		DL_EncryptionAlgorithm_Xor<HMAC<HASH>, DHAES_MODE, LABEL_OCTETS>,
 		ECIES<EC> >
 {
-	// TODO: fix this after name is standardized
+	// NOTE: fix this after name is standardized
 	CRYPTOPP_STATIC_CONSTEXPR const char* CRYPTOPP_API StaticAlgorithmName() {return "ECIES";}
 };
 
@@ -646,7 +646,7 @@ struct ECIES_P1363
 		DL_EncryptionAlgorithm_Xor<HMAC<HASH>, false, true>,
 		ECIES<EC> >
 {
-	// TODO: fix this after name is standardized
+	// NOTE: fix this after name is standardized
 	CRYPTOPP_STATIC_CONSTEXPR const char* CRYPTOPP_API StaticAlgorithmName() {return "ECIES-P1363";}
 };
 

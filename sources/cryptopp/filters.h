@@ -1368,7 +1368,7 @@ public:
 
 	/// \brief Pump messages to attached transformation
 	/// \param count the maximum number of messages to pump
-	/// \return TODO
+	/// \return NOTE
 	/// \details Internally, PumpMessages() calls PumpMessages2().
 	unsigned int PumpMessages(unsigned int count=UINT_MAX)
 		{PumpMessages2(count); return count;}

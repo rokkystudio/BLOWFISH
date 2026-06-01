@@ -360,7 +360,7 @@ void Inflator::ProcessInput(bool flush)
 				return;
 			ProcessPoststreamTail();
 			m_state = m_repeat ? PRE_STREAM : AFTER_END;
-			Output(0, NULLPTR, 0, GetAutoSignalPropagation(), true);	// TODO: non-blocking
+			Output(0, NULLPTR, 0, GetAutoSignalPropagation(), true);	// NOTE: non-blocking
 			if (m_inQueue.IsEmpty())
 				return;
 			break;

@@ -66,7 +66,7 @@
 // We can't test for unique_ptr directly because some of the non-Apple Clangs
 // on OS X fail the same way. However, modern standard libraries have
 // <forward_list>, so we test for it instead. Thanks to Jonathan Wakely for
-// devising the clever test for modern/ancient versions. TODO: test under
+// devising the clever test for modern/ancient versions. NOTE: test under
 // Xcode 3, where g++ is really g++.
 #if defined(__APPLE__) && defined(__clang__)
 #  if !(defined(__has_include) && __has_include(<forward_list>))
@@ -99,7 +99,7 @@
 #endif // atomics
 
 // synchronization: MS at VS2012 (17.00); GCC at 4.4; Clang at 3.3; Xcode 5.0; Intel 12.0; SunCC 5.13.
-// TODO: verify Clang and Intel versions; find __has_feature(x) extension for Clang
+// NOTE: verify Clang and Intel versions; find __has_feature(x) extension for Clang
 #if (CRYPTOPP_MSC_VERSION >= 1700) || (CRYPTOPP_LLVM_CLANG_VERSION >= 30300) || \
 	(CRYPTOPP_APPLE_CLANG_VERSION >= 50000) || (__INTEL_COMPILER >= 1200) || \
 	(CRYPTOPP_GCC_VERSION >= 40400) || (__SUNPRO_CC >= 0x5130)

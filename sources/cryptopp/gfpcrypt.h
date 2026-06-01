@@ -1024,7 +1024,7 @@ struct DLIES
         DL_EncryptionAlgorithm_Xor<HMAC<HASH>, DHAES_MODE, LABEL_OCTETS>,
         DLIES<> >
 {
-    static std::string CRYPTOPP_API StaticAlgorithmName() {return "DLIES";}    // TODO: fix this after name is standardized
+    static std::string CRYPTOPP_API StaticAlgorithmName() {return "DLIES";}    // NOTE: fix this after name is standardized
 };
 
 NAMESPACE_END

@@ -485,7 +485,7 @@ template <class EC> void DL_GroupParameters_EC<EC>::Initialize(const OID &oid)
 	bool result = GetCurve().DecodePoint(G, ssG, (size_t)ssG.MaxRetrievable());
 	this->SetSubgroupGenerator(G);
 
-	// TODO: this fails in practice. Should it throw?
+	// NOTE: this fails in practice. Should it throw?
 	CRYPTOPP_UNUSED(result); CRYPTOPP_ASSERT(result);
 
 	StringSource ssN(param.n, true, new HexDecoder);

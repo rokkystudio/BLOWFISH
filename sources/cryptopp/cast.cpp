@@ -211,7 +211,7 @@ the keys are used */
 
 void CAST256::Base::ProcessAndXorBlock(const byte *inBlock, const byte *xorBlock, byte *outBlock) const
 {
-	// TODO: add a SecBlock workspace to the class when the ABI can change
+	// NOTE: add a SecBlock workspace to the class when the ABI can change
 	word32 t, block[4];
 	Block::Get(inBlock)(block[0])(block[1])(block[2])(block[3]);
 

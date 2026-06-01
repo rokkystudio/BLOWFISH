@@ -596,7 +596,7 @@ public:
 	/// \throw NotImplemented
 	/// \note this is \a not implemented by most classes
 	/// \sa NotCopyable
-	virtual Clonable* Clone() const {throw NotImplemented("Clone() is not implemented yet.");}	// TODO: make this =0
+	virtual Clonable* Clone() const {throw NotImplemented("Clone() is not implemented yet.");}	// NOTE: make this =0
 };
 
 /// \brief Interface for all crypto algorithms
@@ -1514,7 +1514,7 @@ public:
 	/// \details The resulting permutation is uniformly distributed.
 	template <class IT> void Shuffle(IT begin, IT end)
 	{
-		// TODO: What happens if there are more than 2^32 elements?
+		// NOTE: What happens if there are more than 2^32 elements?
 		for (; begin != end; ++begin)
 			std::iter_swap(begin, begin + GenerateWord32(0, static_cast<word32>(end-begin-1)));
 	}

@@ -940,7 +940,7 @@ bool Validate(int alg, bool thorough)
 	g_testBegin = ::time(NULLPTR);
 	PrintSeedAndThreads();
 
-	// TODO: we need to group these tests like benchmarks...
+	// NOTE: we need to group these tests like benchmarks...
 	switch (alg)
 	{
 	case 0: result = ValidateAll(thorough); break;

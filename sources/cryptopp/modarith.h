@@ -146,10 +146,10 @@ public:
 	/// \return the sum of <tt>a</tt> and <tt>b</tt>
 	const Integer& Add(const Integer &a, const Integer &b) const;
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param a first element
 	/// \param b second element
-	/// \return TODO
+	/// \return NOTE
 	Integer& Accumulate(Integer &a, const Integer &b) const;
 
 	/// \brief Inverts the element in the ring
@@ -163,10 +163,10 @@ public:
 	/// \return the difference of <tt>a</tt> and <tt>b</tt>. The element <tt>a</tt> must provide a Subtract member function.
 	const Integer& Subtract(const Integer &a, const Integer &b) const;
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param a first element
 	/// \param b second element
-	/// \return TODO
+	/// \return NOTE
 	Integer& Reduce(Integer &a, const Integer &b) const;
 
 	/// \brief Doubles an element in the ring
@@ -218,12 +218,12 @@ public:
 	const Integer& Divide(const Integer &a, const Integer &b) const
 		{return Multiply(a, MultiplicativeInverse(b));}
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param x first element
 	/// \param e1 first exponent
 	/// \param y second element
 	/// \param e2 second exponent
-	/// \return TODO
+	/// \return NOTE
 	Integer CascadeExponentiate(const Integer &x, const Integer &e1, const Integer &y, const Integer &e2) const;
 
 	/// \brief Exponentiates a base to multiple exponents in the ring
@@ -272,7 +272,7 @@ public:
 	static const RandomizationParameter DefaultRandomizationParameter;
 
 private:
-	// TODO: Clang on OS X needs a real operator=.
+	// NOTE: Clang on OS X needs a real operator=.
 	// Squash warning on missing assignment operator.
 	// ModularArithmetic& operator=(const ModularArithmetic &ma);
 

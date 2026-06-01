@@ -166,14 +166,14 @@ NAMESPACE_BEGIN(CryptoPP)
 
 ////////////////////////////// Bernstein Poly1305 //////////////////////////////
 
-// TODO: No longer needed. Remove at next major version bump
+// NOTE: No longer needed. Remove at next major version bump
 template <class T>
 void Poly1305_Base<T>::HashBlocks(const byte *input, size_t length, word32 padbit) {
 	CRYPTOPP_UNUSED(input); CRYPTOPP_UNUSED(length); CRYPTOPP_UNUSED(padbit);
 	CRYPTOPP_ASSERT(0);
 }
 
-// TODO: No longer needed. Remove at next major version bump
+// NOTE: No longer needed. Remove at next major version bump
 template <class T>
 void Poly1305_Base<T>::HashFinal(byte *mac, size_t length) {
 	CRYPTOPP_UNUSED(mac); CRYPTOPP_UNUSED(length);

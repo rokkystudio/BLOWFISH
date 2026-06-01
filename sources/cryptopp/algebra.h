@@ -67,10 +67,10 @@ public:
 	/// \return the difference of <tt>a</tt> and <tt>b</tt>. The element <tt>a</tt> must provide a Subtract member function.
 	virtual const Element& Subtract(const Element &a, const Element &b) const;
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param a first element
 	/// \param b second element
-	/// \return TODO
+	/// \return NOTE
 	virtual Element& Accumulate(Element &a, const Element &b) const;
 
 	/// \brief Reduces an element in the congruence class
@@ -85,12 +85,12 @@ public:
 	/// \return the product
 	virtual Element ScalarMultiply(const Element &a, const Integer &e) const;
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param x first multiplicand
 	/// \param e1 the first multiplier
 	/// \param y second multiplicand
 	/// \param e2 the second multiplier
-	/// \return TODO
+	/// \return NOTE
 	virtual Element CascadeScalarMultiply(const Element &x, const Integer &e1, const Element &y, const Integer &e2) const;
 
 	/// \brief Multiplies a base to multiple exponents in a group
@@ -169,12 +169,12 @@ public:
 	/// \return the exponentiation
 	virtual Element Exponentiate(const Element &a, const Integer &e) const;
 
-	/// \brief TODO
+	/// \brief NOTE
 	/// \param x first element
 	/// \param e1 first exponent
 	/// \param y second element
 	/// \param e2 second exponent
-	/// \return TODO
+	/// \return NOTE
 	virtual Element CascadeExponentiate(const Element &x, const Integer &e1, const Element &y, const Integer &e2) const;
 
 	/// \brief Exponentiates a base to multiple exponents in the Ring

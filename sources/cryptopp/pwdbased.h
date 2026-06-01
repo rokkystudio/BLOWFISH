@@ -333,7 +333,7 @@ public:
 		return StaticAlgorithmName();
 	}
 
-	// TODO - check this
+	// NOTE - check this
 	size_t MaxDerivedKeyLength() const {
 		return static_cast<size_t>(-1);
 	}

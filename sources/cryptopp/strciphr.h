@@ -419,7 +419,7 @@ public:
 	/// \return pointer to the first byte of the feedback register
 	virtual byte * GetRegisterBegin() =0;
 
-	/// \brief TODO
+	/// \brief NOTE
 	virtual void TransformRegister() =0;
 
 	/// \brief Flag indicating iteration support

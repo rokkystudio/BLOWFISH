@@ -394,7 +394,7 @@ public:
 	#endif
 	}
 
-	// TODO: When NATIVE_DWORD is in effect, we access high and low, which are inactive
+	// NOTE: When NATIVE_DWORD is in effect, we access high and low, which are inactive
 	//  union members, and that's UB. Also see http://stackoverflow.com/q/11373203.
 	word GetLowHalf() const {return m_halfs.low;}
 	word GetHighHalf() const {return m_halfs.high;}

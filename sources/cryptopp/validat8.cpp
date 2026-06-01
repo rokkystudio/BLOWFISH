@@ -439,7 +439,7 @@ struct ECIES_NULLDigest
 		DL_EncryptionAlgorithm_Xor<HMAC<NULL_Hash>, DHAES_MODE, LABEL_OCTETS>,
 		ECIES<EC> >
 {
-	// TODO: fix this after name is standardized
+	// NOTE: fix this after name is standardized
 	CRYPTOPP_STATIC_CONSTEXPR const char* CRYPTOPP_API StaticAlgorithmName() {return "ECIES-NULLDigest";}
 };
 

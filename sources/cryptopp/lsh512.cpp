@@ -865,7 +865,7 @@ void LSH512_Base::TruncatedFinal(byte *hash, size_t size)
 	CRYPTOPP_ASSERT(hash != NULLPTR);
 	ThrowIfInvalidTruncatedSize(size);
 
-	// TODO: determine if LSH512 supports truncated hashes. See the code
+	// NOTE: determine if LSH512 supports truncated hashes. See the code
 	// in get_hash(), where a bit-length is added to the last output
 	// byte of the hash function.
 	byte fullHash[LSH512_HASH_VAL_MAX_BYTE_LEN];

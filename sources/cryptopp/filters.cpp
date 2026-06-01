@@ -1096,7 +1096,7 @@ void SignatureVerificationFilter::InitializeDerivedAndReturnNewSizes(const NameV
 	m_flags = parameters.GetValueWithDefault(Name::SignatureVerificationFilterFlags(), (word32)DEFAULT_FLAGS);
 	m_messageAccumulator.reset(m_verifier.NewVerificationAccumulator());
 	size_t size = m_verifier.SignatureLength();
-	CRYPTOPP_ASSERT(size != 0);	// TODO: handle recoverable signature scheme
+	CRYPTOPP_ASSERT(size != 0);	// NOTE: handle recoverable signature scheme
 	m_verified = false;
 	firstSize = m_flags & SIGNATURE_AT_BEGIN ? size : 0;
 	blockSize = 1;

@@ -350,7 +350,7 @@ bool ValidateEC2N()
 	std::cout << "\nTesting SEC 2 EC2N curves...\n\n";
 	bool pass = true; OID oid;
 
-#if 1	// TODO: turn this back on when I make EC2N faster for pentanomial basis
+#if 1	// NOTE: turn this back on when I make EC2N faster for pentanomial basis
 	while (!(oid = DL_GroupParameters_EC<EC2N>::GetNextRecommendedParametersOID(oid)).GetValues().empty())
 	{
 		DL_GroupParameters_EC<EC2N> params(oid);

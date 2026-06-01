@@ -331,7 +331,7 @@ struct ed25519_MessageAccumulator : public PK_MessageAccumulator
     }
 
 protected:
-    // TODO: Find an equivalent Crypto++ structure.
+    // NOTE: Find an equivalent Crypto++ structure.
     std::vector<byte, AllocatorWithCleanup<byte> > m_msg;
 };
 

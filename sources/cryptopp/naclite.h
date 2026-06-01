@@ -287,10 +287,10 @@ int crypto_box_open_unchecked(byte *m,const byte *c,word64 d,const byte *n,const
 /// \since Crypto++ 6.0
 int crypto_box_beforenm_unchecked(byte *k,const byte *y,const byte *x);
 
-/// \brief TODO
+/// \brief NOTE
 int crypto_core_salsa20(byte *out,const byte *in,const byte *k,const byte *c);
 
-/// \brief TODO
+/// \brief NOTE
 /// \return 0 on success, non-0 otherwise
 /// \since Crypto++ 6.0
 int crypto_core_hsalsa20(byte *out,const byte *in,const byte *k,const byte *c);
