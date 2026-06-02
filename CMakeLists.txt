@@ -74,12 +74,14 @@ net session >nul 2>&1
 if errorlevel 1 (
     if /i "%~1"=="__elevated" (
         echo ERROR: Administrative privileges are required.
+        call :notify "Blowfish install failed" "Administrative privileges are required." "Error"
         exit /b 1
     )
 
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '__elevated' -Verb RunAs"
     if errorlevel 1 (
         echo ERROR: Elevation was cancelled or failed.
+        call :notify "Blowfish install failed" "Elevation was cancelled or failed." "Error"
         exit /b 1
     )
     exit /b 0
@@ -87,12 +89,14 @@ if errorlevel 1 (
 
 if not exist "%SOURCE_EXE%" (
     echo ERROR: Blowfish.exe not found: "%SOURCE_EXE%"
+    call :notify "Blowfish install failed" "Blowfish.exe was not found next to install.bat." "Error"
     exit /b 1
 )
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 if errorlevel 1 (
     echo ERROR: Failed to create install directory "%INSTALL_DIR%".
+    call :notify "Blowfish install failed" "Failed to create the install directory in Program Files." "Error"
     exit /b 1
 )
 
@@ -105,6 +109,7 @@ if exist "%INSTALL_EXE%" (
 copy /Y "%SOURCE_EXE%" "%INSTALL_EXE%" >nul
 if errorlevel 1 (
     echo ERROR: Failed to copy Blowfish.exe to "%INSTALL_EXE%".
+    call :notify "Blowfish install failed" "Failed to copy Blowfish.exe into Program Files." "Error"
     exit /b 1
 )
 
@@ -120,15 +125,40 @@ reg add "HKCU\Software\Classes\*\shell\Blowfish\shell\Decrypt\command" /ve /t RE
 
 if errorlevel 1 (
     echo ERROR: Failed to write registry keys.
+    call :notify "Blowfish install failed" "Failed to write the context menu registry keys." "Error"
     exit /b 1
 )
 
+call :refresh_shell_icons
+
 if /i "%INSTALL_MODE%"=="updated" (
     echo Updated "%INSTALL_EXE%" to a newer build.
+    echo Explorer icon cache refreshed.
+    call :notify "Blowfish updated" "Blowfish.exe, context menu, and Explorer icons were refreshed." "Info"
 ) else (
     echo Installed "%INSTALL_EXE%".
+    echo Explorer icon cache refreshed.
+    call :notify "Blowfish installed" "Blowfish.exe, context menu, and Explorer icons were refreshed." "Info"
 )
 echo Context menu installed.
+exit /b 0
+
+:refresh_shell_icons
+set "IE4UINIT=%SystemRoot%\System32\ie4uinit.exe"
+if exist "%IE4UINIT%" (
+    "%IE4UINIT%" -ClearIconCache >nul 2>&1
+    "%IE4UINIT%" -show >nul 2>&1
+)
+taskkill /IM explorer.exe /F >nul 2>&1
+start "" explorer.exe >nul 2>&1
+timeout /t 2 /nobreak >nul
+exit /b 0
+
+:notify
+set "NOTIFY_TITLE=%~1"
+set "NOTIFY_MESSAGE=%~2"
+set "NOTIFY_ICON=%~3"
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand QQBkAGQALQBUAHkAcABlACAALQBBAHMAcwBlAG0AYgBsAHkATgBhAG0AZQAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAKAEEAZABkAC0AVAB5AHAAZQAgAC0AQQBzAHMAZQBtAGIAbAB5AE4AYQBtAGUAIABTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcACgAkAHQAaQB0AGwAZQAgAD0AIAAkAGUAbgB2ADoATgBPAFQASQBGAFkAXwBUAEkAVABMAEUACgAkAG0AZQBzAHMAYQBnAGUAIAA9ACAAJABlAG4AdgA6AE4ATwBUAEkARgBZAF8ATQBFAFMAUwBBAEcARQAKACQAaQBjAG8AbgBOAGEAbQBlACAAPQAgACQAZQBuAHYAOgBOAE8AVABJAEYAWQBfAEkAQwBPAE4ACgAkAG4AbwB0AGkAZgB5AEkAYwBvAG4AIAA9ACAATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAuAE4AbwB0AGkAZgB5AEkAYwBvAG4ACgBzAHcAaQB0AGMAaAAgACgAJABpAGMAbwBuAE4AYQBtAGUAKQAgAHsACgAgACAAJwBFAHIAcgBvAHIAJwAgAHsACgAgACAAIAAgACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcALgBTAHkAcwB0AGUAbQBJAGMAbwBuAHMAXQA6ADoARQByAHIAbwByAAoAIAAgACAAIAAkAGIAYQBsAGwAbwBvAG4ASQBjAG8AbgAgAD0AIABbAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAuAFQAbwBvAGwAVABpAHAASQBjAG8AbgBdADoAOgBFAHIAcgBvAHIACgAgACAAfQAKACAAIAAnAFcAYQByAG4AaQBuAGcAJwAgAHsACgAgACAAIAAgACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcALgBTAHkAcwB0AGUAbQBJAGMAbwBuAHMAXQA6ADoAVwBhAHIAbgBpAG4AZwAKACAAIAAgACAAJABiAGEAbABsAG8AbwBuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBUAG8AbwBsAFQAaQBwAEkAYwBvAG4AXQA6ADoAVwBhAHIAbgBpAG4AZwAKACAAIAB9AAoAIAAgAGQAZQBmAGEAdQBsAHQAIAB7AAoAIAAgACAAIAAkAG4AbwB0AGkAZgB5AEkAYwBvAG4ALgBJAGMAbwBuACAAPQAgAFsAUwB5AHMAdABlAG0ALgBEAHIAYQB3AGkAbgBnAC4AUwB5AHMAdABlAG0ASQBjAG8AbgBzAF0AOgA6AEkAbgBmAG8AcgBtAGEAdABpAG8AbgAKACAAIAAgACAAJABiAGEAbABsAG8AbwBuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBUAG8AbwBsAFQAaQBwAEkAYwBvAG4AXQA6ADoASQBuAGYAbwAKACAAIAB9AAoAfQAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEIAYQBsAGwAbwBvAG4AVABpAHAAVABpAHQAbABlACAAPQAgACQAdABpAHQAbABlAAoAJABuAG8AdABpAGYAeQBJAGMAbwBuAC4AQgBhAGwAbABvAG8AbgBUAGkAcABUAGUAeAB0ACAAPQAgACQAbQBlAHMAcwBhAGcAZQAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEIAYQBsAGwAbwBvAG4AVABpAHAASQBjAG8AbgAgAD0AIAAkAGIAYQBsAGwAbwBvAG4ASQBjAG8AbgAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAFYAaQBzAGkAYgBsAGUAIAA9ACAAJAB0AHIAdQBlAAoAJABuAG8AdABpAGYAeQBJAGMAbwBuAC4AUwBoAG8AdwBCAGEAbABsAG8AbwBuAFQAaQBwACgANQAwADAAMAApAAoAUwB0AGEAcgB0AC0AUwBsAGUAZQBwACAALQBNAGkAbABsAGkAcwBlAGMAbwBuAGQAcwAgADUANQAwADAACgAkAG4AbwB0AGkAZgB5AEkAYwBvAG4ALgBEAGkAcwBwAG8AcwBlACgAKQA= >nul 2>&1
 exit /b 0
 ]=]
 )
@@ -145,12 +175,14 @@ net session >nul 2>&1
 if errorlevel 1 (
     if /i "%~1"=="__elevated" (
         echo ERROR: Administrative privileges are required.
+        call :notify "Blowfish uninstall failed" "Administrative privileges are required." "Error"
         exit /b 1
     )
 
     powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '__elevated' -Verb RunAs"
     if errorlevel 1 (
         echo ERROR: Elevation was cancelled or failed.
+        call :notify "Blowfish uninstall failed" "Elevation was cancelled or failed." "Error"
         exit /b 1
     )
     exit /b 0
@@ -163,11 +195,34 @@ if exist "%INSTALL_DIR%\" (
     rmdir /S /Q "%INSTALL_DIR%" >nul 2>&1
     if exist "%INSTALL_DIR%\" (
         echo ERROR: Failed to delete "%INSTALL_DIR%".
+        call :notify "Blowfish uninstall failed" "Failed to delete the Program Files directory." "Error"
         exit /b 1
     )
 )
 
+call :refresh_shell_icons
+
 echo Context menu removed and installation files cleaned from Program Files.
+echo Explorer icon cache refreshed.
+call :notify "Blowfish removed" "Context menu, installed files, and Explorer icons were refreshed." "Info"
+exit /b 0
+
+:refresh_shell_icons
+set "IE4UINIT=%SystemRoot%\System32\ie4uinit.exe"
+if exist "%IE4UINIT%" (
+    "%IE4UINIT%" -ClearIconCache >nul 2>&1
+    "%IE4UINIT%" -show >nul 2>&1
+)
+taskkill /IM explorer.exe /F >nul 2>&1
+start "" explorer.exe >nul 2>&1
+timeout /t 2 /nobreak >nul
+exit /b 0
+
+:notify
+set "NOTIFY_TITLE=%~1"
+set "NOTIFY_MESSAGE=%~2"
+set "NOTIFY_ICON=%~3"
+powershell -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand QQBkAGQALQBUAHkAcABlACAALQBBAHMAcwBlAG0AYgBsAHkATgBhAG0AZQAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAKAEEAZABkAC0AVAB5AHAAZQAgAC0AQQBzAHMAZQBtAGIAbAB5AE4AYQBtAGUAIABTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcACgAkAHQAaQB0AGwAZQAgAD0AIAAkAGUAbgB2ADoATgBPAFQASQBGAFkAXwBUAEkAVABMAEUACgAkAG0AZQBzAHMAYQBnAGUAIAA9ACAAJABlAG4AdgA6AE4ATwBUAEkARgBZAF8ATQBFAFMAUwBBAEcARQAKACQAaQBjAG8AbgBOAGEAbQBlACAAPQAgACQAZQBuAHYAOgBOAE8AVABJAEYAWQBfAEkAQwBPAE4ACgAkAG4AbwB0AGkAZgB5AEkAYwBvAG4AIAA9ACAATgBlAHcALQBPAGIAagBlAGMAdAAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAuAE4AbwB0AGkAZgB5AEkAYwBvAG4ACgBzAHcAaQB0AGMAaAAgACgAJABpAGMAbwBuAE4AYQBtAGUAKQAgAHsACgAgACAAJwBFAHIAcgBvAHIAJwAgAHsACgAgACAAIAAgACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcALgBTAHkAcwB0AGUAbQBJAGMAbwBuAHMAXQA6ADoARQByAHIAbwByAAoAIAAgACAAIAAkAGIAYQBsAGwAbwBvAG4ASQBjAG8AbgAgAD0AIABbAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwAuAFQAbwBvAGwAVABpAHAASQBjAG8AbgBdADoAOgBFAHIAcgBvAHIACgAgACAAfQAKACAAIAAnAFcAYQByAG4AaQBuAGcAJwAgAHsACgAgACAAIAAgACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAEQAcgBhAHcAaQBuAGcALgBTAHkAcwB0AGUAbQBJAGMAbwBuAHMAXQA6ADoAVwBhAHIAbgBpAG4AZwAKACAAIAAgACAAJABiAGEAbABsAG8AbwBuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBUAG8AbwBsAFQAaQBwAEkAYwBvAG4AXQA6ADoAVwBhAHIAbgBpAG4AZwAKACAAIAB9AAoAIAAgAGQAZQBmAGEAdQBsAHQAIAB7AAoAIAAgACAAIAAkAG4AbwB0AGkAZgB5AEkAYwBvAG4ALgBJAGMAbwBuACAAPQAgAFsAUwB5AHMAdABlAG0ALgBEAHIAYQB3AGkAbgBnAC4AUwB5AHMAdABlAG0ASQBjAG8AbgBzAF0AOgA6AEkAbgBmAG8AcgBtAGEAdABpAG8AbgAKACAAIAAgACAAJABiAGEAbABsAG8AbwBuAEkAYwBvAG4AIAA9ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBUAG8AbwBsAFQAaQBwAEkAYwBvAG4AXQA6ADoASQBuAGYAbwAKACAAIAB9AAoAfQAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEIAYQBsAGwAbwBvAG4AVABpAHAAVABpAHQAbABlACAAPQAgACQAdABpAHQAbABlAAoAJABuAG8AdABpAGYAeQBJAGMAbwBuAC4AQgBhAGwAbABvAG8AbgBUAGkAcABUAGUAeAB0ACAAPQAgACQAbQBlAHMAcwBhAGcAZQAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAEIAYQBsAGwAbwBvAG4AVABpAHAASQBjAG8AbgAgAD0AIAAkAGIAYQBsAGwAbwBvAG4ASQBjAG8AbgAKACQAbgBvAHQAaQBmAHkASQBjAG8AbgAuAFYAaQBzAGkAYgBsAGUAIAA9ACAAJAB0AHIAdQBlAAoAJABuAG8AdABpAGYAeQBJAGMAbwBuAC4AUwBoAG8AdwBCAGEAbABsAG8AbwBuAFQAaQBwACgANQAwADAAMAApAAoAUwB0AGEAcgB0AC0AUwBsAGUAZQBwACAALQBNAGkAbABsAGkAcwBlAGMAbwBuAGQAcwAgADUANQAwADAACgAkAG4AbwB0AGkAZgB5AEkAYwBvAG4ALgBEAGkAcwBwAG8AcwBlACgAKQA= >nul 2>&1
 exit /b 0
 ]=]
 )
