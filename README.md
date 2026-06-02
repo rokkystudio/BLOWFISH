@@ -1,81 +1,98 @@
 # Blowfish
 
-Blowfish — консольная Windows-программа для шифрования и расшифрования файлов алгоритмом Blowfish-CBC. Программа также умеет запускаться из контекстного меню Проводника и показывать Win32-окно ввода ключа.
+`Blowfish` — консольная Windows-программа для шифрования и расшифрования файлов
+алгоритмом Blowfish с собственным локальным движком, без `Crypto++`, `OpenSSL`,
+`PBKDF2` и парольной обвязки.
 
-## Модель работы
+Программа работает только с raw key.
 
-EXE остается консольным приложением. При обычном запуске из терминала он принимает аргументы командной строки. При запуске из контекстного меню Windows REG-файл передает программе специальный режим `--shell-encrypt` или `--shell-decrypt`; в этом режиме программа показывает окно ввода ключа и выполняет операцию над выбранным файлом.
+Папка `sources/cryptopp` остаётся в репозитории. Сейчас библиотека не участвует
+в сборке и не нужна для текущей реализации, но её сохраняем на случай будущих
+задач.
 
-Такой вариант проще и надежнее, чем один `WINDOWS`-subsystem EXE с `AttachConsole`, потому что консольный запуск из `cmd`, PowerShell и терминала работает синхронно и предсказуемо. При запуске из Проводника Windows может кратко показать консольное окно. Если нужно полностью убрать консоль при запуске из Проводника, лучше сделать второй маленький GUI-launcher EXE и оставить текущий EXE чистым CLI-инструментом.
+## Что умеет
 
-## Криптографический формат файла
+- `CBC` и `CFB`
+- `IV` в начале файла
+- `IV` в конце файла
+- `IV` вручную, без хранения в файле
+- запуск из консоли
+- запуск из контекстного меню Проводника
 
-Выходной файл содержит только шифртекст без заголовка, magic и HMAC.
+## Формат данных
 
-Ключ и IV детерминированно получаются из пароля через PBKDF2-HMAC-SHA256
-(с фиксированной солью внутри программы), а шифрование выполняется в потоковом
-режиме Blowfish CFB.
+Размер блока Blowfish — `8` байт.
 
-Из-за отсутствия маркеров/проверки целостности расшифровка любого набора байтов
-любым ключом вернет некоторый результат без гарантии корректности исходных данных.
+Поддерживаются три схемы хранения:
 
-## Зависимости
+- `prefix`: `[IV][ciphertext]`
+- `suffix`: `[ciphertext][IV]`
+- `manual`: `[ciphertext]`, а `IV` передаётся отдельно
 
-Проект использует OpenSSL. Для OpenSSL 3 нужен `legacy` provider, потому что Blowfish находится в legacy-наборе алгоритмов.
+Для `CBC` используется `PKCS#5/PKCS#7` padding.
 
-Один из вариантов установки через vcpkg:
+Для `CFB` padding не используется.
 
-```powershell
-vcpkg install openssl:x64-windows
-```
-
-В CLion укажите toolchain/CMake preset, который использует vcpkg toolchain file, например:
-
-```powershell
-cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
-cmake --build build --config Release
-```
-
-Для запуска рядом с EXE должны быть runtime-файлы OpenSSL. Для OpenSSL 3 обычно нужны `libcrypto-3-x64.dll` и каталог `ossl-modules` с `legacy.dll`. Если провайдер лежит в другом месте, задайте переменную окружения `OPENSSL_MODULES` на каталог с модулями OpenSSL.
+Никаких специальных заголовков, `base64`, `HMAC`, `PBKDF2`, magic bytes или
+форматных контейнеров программа не добавляет.
 
 ## Использование из консоли
 
 Шифрование:
 
 ```powershell
-.\Blowfish.exe --encrypt --input "C:\Data\file.txt" --ask-key
+.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.bf" -k "16wmCCdPx7NOLG3"
 ```
 
-Расшифрование:
+Шифрование `CBC` с `IV` в начале файла:
 
 ```powershell
-.\Blowfish.exe --decrypt --input "C:\Data\file.txt.bf" --ask-key
+.\Blowfish.exe --encrypt -i "C:\Data\bundle.json" -o "C:\Data\hide.dat" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position prefix
 ```
 
-Ключ можно передать аргументом:
+Расшифрование `CBC` с `IV` в конце файла:
 
 ```powershell
-.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.txt.bf" -k "my password"
+.\Blowfish.exe --decrypt -i "C:\Data\file.dat" -o "C:\Data\file.json" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position suffix
 ```
 
-Передача ключа через `--key` удобна для тестов, но ключ может попасть в историю команд и список процессов. Для ручной работы используйте `--ask-key`.
-
-По умолчанию существующий выходной файл не перезаписывается. Для перезаписи используйте:
+Расшифрование с ручным `IV`:
 
 ```powershell
-.\Blowfish.exe --decrypt -i "C:\Data\file.txt.bf" -o "C:\Data\file.txt" --ask-key --force
+.\Blowfish.exe --decrypt -i "C:\Data\file.bin" -o "C:\Data\file.txt" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position manual --iv-hex 0011223344556677
 ```
 
-Если `--output` не задан, имя выходного файла вычисляется автоматически:
+`CFB`:
 
-- шифрование `.zip` -> `.pack`;
-- расшифрование `.pack` -> `.zip`;
-- иначе при шифровании добавляется `.bf`;
-- иначе при расшифровании убирается `.bf`, а если его нет — добавляется `.ubf`.
+```powershell
+.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.cfb" -k "16wmCCdPx7NOLG3" --mode cfb --iv-position prefix
+```
 
-При запуске без параметров или с некорректными аргументами программа печатает справку по использованию.
+## Параметры CLI
 
-## Установка пункта в контекстное меню
+- `--encrypt`
+- `--decrypt`
+- `--input` / `-i`
+- `--output` / `-o`
+- `--key` / `-k`
+- `--mode cbc|cfb`
+- `--iv-position prefix|suffix|manual`
+- `--iv-hex`
+- `--force`
+- `--help`
+
+По умолчанию:
+
+- `mode = cbc`
+- `iv-position = prefix`
+
+Если `--output` не задан:
+
+- при шифровании добавляется `.bf`
+- при расшифровании убирается `.bf`
+- если расширения `.bf` нет, добавляется `.ubf`
+
+## Контекстное меню
 
 После сборки CMake публикует в папку `build`:
 
@@ -83,46 +100,44 @@ cmake --build build --config Release
 - `build\install.bat`
 - `build\uninstall.bat`
 
-Исходные placeholder-иконки лежат в `resources\icons` и встраиваются в `Blowfish.exe` как ресурсы.
-
-`install.bat` копирует EXE в `C:\Program Files\Blowfish\Blowfish.exe`
-и прописывает контекстное меню на этот путь. Если прав администратора нет, BAT
-запрашивает UAC-повышение в момент запуска.
-
 Установка:
 
 ```powershell
 .\build\install.bat
 ```
 
-После установки при клике правой кнопкой по файлу появится меню:
-
-```text
-Blowfish
-  Encrypt
-  Decrypt
-```
-
-Режимы контекстного меню создают выходные файлы рядом с исходным файлом по тем же правилам:
-
-```text
-Encrypt + .zip: <исходный_файл>.pack
-Decrypt + .pack: <исходный_файл>.zip
-Иначе Encrypt: <исходный_файл>.bf
-Иначе Decrypt: убрать .bf или добавить .ubf
-```
-
-Удаление пункта меню:
+Удаление:
 
 ```powershell
 .\build\uninstall.bat
 ```
 
-`uninstall.bat` удаляет ключ контекстного меню и рекурсивно удаляет всю папку
-`C:\Program Files\Blowfish` вместе с вложенными файлами и подпапками, также с UAC-запросом при необходимости.
+При запуске из контекстного меню открывается окно, где пользователь задаёт:
+
+- raw key
+- `mode`: `CBC` или `CFB`
+- `iv-position`: `prefix`, `suffix` или `manual`
+- `IV hex`, если выбран `manual`
+
+То есть GUI не скрывает эти параметры и не подставляет старую парольную модель.
+
+## Сборка
+
+Обычная сборка:
+
+```powershell
+cmake -S . -B cmake-build-debug
+cmake --build cmake-build-debug --target Blowfish
+```
+
+Проект собирается на встроенном локальном движке Blowfish из:
+
+- [sources/blowfish.h](/D:/PROJECTS/BLOWFISH/sources/blowfish.h)
+- [sources/blowfish.cpp](/D:/PROJECTS/BLOWFISH/sources/blowfish.cpp)
 
 ## Ограничения
 
-Blowfish имеет размер блока 64 бита. Для новых форматов обычно предпочтительнее AES-GCM или ChaCha20-Poly1305, но этот проект намеренно использует Blowfish.
-
-Программа не удаляет исходный файл после шифрования и не перезаписывает выходной файл без `--force`.
+- Blowfish имеет блок `64` бита, это старый алгоритм.
+- Проверки целостности в формате нет.
+- При неверном ключе или `IV` расшифровка может дать мусор, а в `CBC` также
+  может завершиться ошибкой padding.

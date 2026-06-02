@@ -1,21 +1,13 @@
 #include <windows.h>
 #include <shellapi.h>
+#include <bcrypt.h>
 
 #include "app_resource.h"
-
-#include <cryptopp/blowfish.h>
-#include <cryptopp/cryptlib.h>
-#include <cryptopp/filters.h>
-#include <cryptopp/hmac.h>
-#include <cryptopp/misc.h>
-#include <cryptopp/modes.h>
-#include <cryptopp/osrng.h>
-#include <cryptopp/pwdbased.h>
-#include <cryptopp/secblock.h>
-#include <cryptopp/sha.h>
+#include "blowfish.h"
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cwctype>
 #include <exception>
@@ -23,9 +15,8 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <memory>
 #include <optional>
-#include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -35,63 +26,63 @@ namespace fs = std::filesystem;
 
 namespace
 {
-    using Byte = CryptoPP::byte;
+    using Byte = blowfish::Byte;
 
-    constexpr std::array<Byte, 4> FileMagic = { 'B', 'F', 'W', '2' };
-    constexpr unsigned int KdfIterations = 310000;
-    constexpr std::size_t SaltSize = 16;
-    constexpr std::size_t IvSize = CryptoPP::Blowfish::BLOCKSIZE;
-    constexpr std::size_t CipherKeySize = 32;
-    constexpr std::size_t HmacKeySize = 32;
-    constexpr std::size_t HmacSize = CryptoPP::SHA256::DIGESTSIZE;
-    constexpr std::size_t HeaderSize = FileMagic.size() + sizeof(std::uint32_t) + SaltSize + IvSize;
-    constexpr std::size_t BufferSize = 64 * 1024;
-    constexpr std::array<Byte, SaltSize> FixedKdfSalt = {
-        0x42, 0x6C, 0x6F, 0x77, 0x66, 0x69, 0x73, 0x68,
-        0x2D, 0x46, 0x69, 0x78, 0x65, 0x64, 0x2D, 0x53
-    };
+    constexpr std::size_t IvSize = blowfish::Blowfish::BlockSize;
 
-    constexpr int KeyEditId = 1001;
-    constexpr int FileStaticId = 1002;
+    constexpr int FileStaticId = 1001;
+    constexpr int KeyEditId = 1002;
+    constexpr int ModeCbcId = 1003;
+    constexpr int ModeCfbId = 1004;
+    constexpr int IvPrefixId = 1005;
+    constexpr int IvSuffixId = 1006;
+    constexpr int IvManualId = 1007;
+    constexpr int IvEditId = 1008;
 
-    enum class Mode
+    enum class OperationMode
     {
         None,
         Encrypt,
         Decrypt
     };
 
+    enum class CipherMode
+    {
+        Cbc,
+        Cfb
+    };
+
+    enum class IvMode
+    {
+        Prefix,
+        Suffix,
+        Manual
+    };
+
     struct Options
     {
-        Mode mode = Mode::None;
+        OperationMode operation = OperationMode::None;
+        CipherMode cipherMode = CipherMode::Cbc;
+        IvMode ivMode = IvMode::Prefix;
         bool shellMode = false;
-        bool askKey = false;
         bool force = false;
         bool help = false;
         fs::path inputPath;
         fs::path outputPath;
-        std::wstring password;
-    };
-
-    struct KeyMaterial
-    {
-        std::array<Byte, CipherKeySize> cipherKey = {};
-        std::array<Byte, HmacKeySize> hmacKey = {};
-    };
-
-    struct FileHeader
-    {
-        std::uint32_t iterations = 0;
-        std::array<Byte, SaltSize> salt = {};
-        std::array<Byte, IvSize> iv = {};
+        std::wstring keyText;
+        std::wstring ivHex;
     };
 
     struct KeyDialogState
     {
         std::wstring title;
         std::wstring filePath;
-        std::wstring password;
-        HWND editHandle = nullptr;
+        std::wstring keyText;
+        std::wstring ivHex;
+        CipherMode cipherMode = CipherMode::Cbc;
+        IvMode ivMode = IvMode::Prefix;
+        HWND keyEditHandle = nullptr;
+        HWND ivEditHandle = nullptr;
         bool accepted = false;
     };
 
@@ -101,9 +92,6 @@ namespace
         using std::runtime_error::runtime_error;
     };
 
-    /**
-     * Переводит UTF-16 строку Windows в UTF-8.
-     */
     std::string toUtf8(std::wstring_view value)
     {
         if (value.empty())
@@ -133,9 +121,6 @@ namespace
         return result;
     }
 
-    /**
-     * Переводит UTF-8 строку в UTF-16 строку Windows.
-     */
     std::wstring fromUtf8(std::string_view value)
     {
         if (value.empty())
@@ -165,234 +150,54 @@ namespace
         return result;
     }
 
-    /**
-     * Возвращает путь в кавычках для диагностических сообщений.
-     */
     std::string quotePath(const fs::path& path)
     {
         return "\"" + toUtf8(path.wstring()) + "\"";
     }
 
-    /**
-     * Настраивает кодировку консоли Windows на UTF-8.
-     */
     void configureConsole()
     {
         SetConsoleCP(CP_UTF8);
         SetConsoleOutputCP(CP_UTF8);
     }
 
-    /**
-     * Добавляет 32-битное число в буфер в little-endian формате.
-     */
-    void appendUint32Le(std::vector<Byte>& buffer, std::uint32_t value)
+    std::wstring toLower(std::wstring value)
     {
-        buffer.push_back(static_cast<Byte>(value & 0xFFu));
-        buffer.push_back(static_cast<Byte>((value >> 8u) & 0xFFu));
-        buffer.push_back(static_cast<Byte>((value >> 16u) & 0xFFu));
-        buffer.push_back(static_cast<Byte>((value >> 24u) & 0xFFu));
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](const wchar_t symbol)
+            {
+                return static_cast<wchar_t>(std::towlower(symbol));
+            });
+
+        return value;
     }
 
-    /**
-     * Читает 32-битное число из массива в little-endian формате.
-     */
-    std::uint32_t readUint32Le(const std::array<Byte, sizeof(std::uint32_t)>& buffer)
+    bool extensionEquals(const fs::path& path, std::wstring_view extension)
     {
-        return static_cast<std::uint32_t>(buffer[0])
-            | (static_cast<std::uint32_t>(buffer[1]) << 8u)
-            | (static_cast<std::uint32_t>(buffer[2]) << 16u)
-            | (static_cast<std::uint32_t>(buffer[3]) << 24u);
+        return toLower(path.extension().wstring()) == toLower(std::wstring(extension));
     }
 
-    /**
-     * Заполняет массив криптографически стойкими случайными байтами.
-     */
     template <std::size_t Size>
     std::array<Byte, Size> randomBytes()
     {
         std::array<Byte, Size> result = {};
+        const NTSTATUS status = BCryptGenRandom(
+            nullptr,
+            reinterpret_cast<PUCHAR>(result.data()),
+            static_cast<ULONG>(result.size()),
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 
-        CryptoPP::AutoSeededRandomPool randomPool;
-        randomPool.GenerateBlock(result.data(), result.size());
+        if (status < 0)
+        {
+            throw std::runtime_error("Cannot generate random bytes for IV");
+        }
 
         return result;
     }
 
-    /**
-     * Возвращает заголовок файла Blowfish.
-     */
-    std::vector<Byte> buildHeader(
-        std::uint32_t iterations,
-        const std::array<Byte, SaltSize>& salt,
-        const std::array<Byte, IvSize>& iv)
-    {
-        std::vector<Byte> header;
-        header.reserve(HeaderSize);
-
-        header.insert(header.end(), FileMagic.begin(), FileMagic.end());
-        appendUint32Le(header, iterations);
-        header.insert(header.end(), salt.begin(), salt.end());
-        header.insert(header.end(), iv.begin(), iv.end());
-
-        return header;
-    }
-
-    /**
-     * Читает точное количество байтов из входного файла.
-     */
-    void readExact(std::ifstream& input, Byte* output, std::size_t size, std::string_view description)
-    {
-        input.read(reinterpret_cast<char*>(output), static_cast<std::streamsize>(size));
-
-        if (input.gcount() != static_cast<std::streamsize>(size))
-        {
-            std::ostringstream message;
-            message << "Cannot read " << description;
-            throw std::runtime_error(message.str());
-        }
-    }
-
-    /**
-     * Читает и проверяет заголовок файла Blowfish.
-     */
-    FileHeader readHeader(std::ifstream& input)
-    {
-        std::array<Byte, FileMagic.size()> magic = {};
-        readExact(input, magic.data(), magic.size(), "file magic");
-
-        if (magic != FileMagic)
-        {
-            throw std::runtime_error("Input file has unsupported format");
-        }
-
-        std::array<Byte, sizeof(std::uint32_t)> iterationBytes = {};
-        readExact(input, iterationBytes.data(), iterationBytes.size(), "KDF iteration count");
-
-        FileHeader header;
-        header.iterations = readUint32Le(iterationBytes);
-
-        if (header.iterations == 0)
-        {
-            throw std::runtime_error("Input file has invalid KDF iteration count");
-        }
-
-        readExact(input, header.salt.data(), header.salt.size(), "salt");
-        readExact(input, header.iv.data(), header.iv.size(), "initialization vector");
-
-        return header;
-    }
-
-    /**
-     * Читает заголовок файла Blowfish из указанного пути.
-     */
-    FileHeader readHeaderFromFile(const fs::path& inputPath)
-    {
-        std::ifstream input(inputPath, std::ios::binary);
-        if (!input)
-        {
-            throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
-        }
-
-        return readHeader(input);
-    }
-
-    /**
-     * Производит ключи шифрования и HMAC из пользовательского пароля.
-     */
-    KeyMaterial deriveKeyMaterial(
-        const std::wstring& password,
-        const std::array<Byte, SaltSize>& salt,
-        std::uint32_t iterations)
-    {
-        if (password.empty())
-        {
-            throw std::runtime_error("Key cannot be empty");
-        }
-
-        std::string passwordUtf8 = toUtf8(password);
-        std::array<Byte, CipherKeySize + HmacKeySize> rawKey = {};
-
-        CryptoPP::PKCS5_PBKDF2_HMAC<CryptoPP::SHA256> pbkdf;
-        pbkdf.DeriveKey(
-            rawKey.data(),
-            rawKey.size(),
-            0,
-            reinterpret_cast<const Byte*>(passwordUtf8.data()),
-            passwordUtf8.size(),
-            salt.data(),
-            salt.size(),
-            iterations);
-
-        KeyMaterial material;
-        std::copy_n(rawKey.begin(), material.cipherKey.size(), material.cipherKey.begin());
-        std::copy_n(rawKey.begin() + material.cipherKey.size(), material.hmacKey.size(), material.hmacKey.begin());
-
-        SecureZeroMemory(rawKey.data(), rawKey.size());
-        SecureZeroMemory(passwordUtf8.data(), passwordUtf8.size());
-
-        return material;
-    }
-
-    /**
-     * Очищает ключевой материал из памяти.
-     */
-    void clearKeyMaterial(KeyMaterial& material)
-    {
-        SecureZeroMemory(material.cipherKey.data(), material.cipherKey.size());
-        SecureZeroMemory(material.hmacKey.data(), material.hmacKey.size());
-    }
-
-    /**
-     * Производит IV из уже полученного ключевого материала.
-     */
-    std::array<Byte, IvSize> deriveIvFromKeyMaterial(const KeyMaterial& material)
-    {
-        std::array<Byte, IvSize> iv = {};
-        std::copy_n(material.hmacKey.begin(), iv.size(), iv.begin());
-        return iv;
-    }
-
-    /**
-     * Вычисляет HMAC-SHA256 для потока байтов.
-     */
-    class HmacSha256
-    {
-    public:
-        explicit HmacSha256(const std::array<Byte, HmacKeySize>& key)
-            : hmac_(key.data(), key.size())
-        {
-        }
-
-        /**
-         * Добавляет байты в текущий HMAC.
-         */
-        void update(const Byte* data, std::size_t size)
-        {
-            if (size == 0)
-            {
-                return;
-            }
-
-            hmac_.Update(data, size);
-        }
-
-        /**
-         * Возвращает итоговый HMAC-SHA256.
-         */
-        std::array<Byte, HmacSize> final()
-        {
-            std::array<Byte, HmacSize> result = {};
-            hmac_.Final(result.data());
-            return result;
-        }
-
-    private:
-        CryptoPP::HMAC<CryptoPP::SHA256> hmac_;
-    };
-
-    /**
-     * Проверяет входной и выходной пути для операции с файлом.
-     */
     void validateFilePaths(const fs::path& inputPath, const fs::path& outputPath, bool force)
     {
         std::error_code error;
@@ -430,9 +235,6 @@ namespace
         }
     }
 
-    /**
-     * Возвращает временный путь для атомарной записи выходного файла.
-     */
     fs::path prepareTemporaryOutputPath(const fs::path& outputPath, bool force)
     {
         fs::path temporaryPath = outputPath;
@@ -456,9 +258,6 @@ namespace
         return temporaryPath;
     }
 
-    /**
-     * Перемещает временный файл в итоговый выходной путь.
-     */
     void finalizeTemporaryOutput(const fs::path& temporaryPath, const fs::path& outputPath, bool force)
     {
         std::error_code error;
@@ -479,68 +278,13 @@ namespace
         }
     }
 
-    /**
-     * Удаляет временный файл, оставшийся после неуспешной операции.
-     */
     void removeTemporaryOutput(const fs::path& temporaryPath)
     {
         std::error_code ignored;
         fs::remove(temporaryPath, ignored);
     }
 
-    /**
-     * Записывает байты в выходной поток и проверяет состояние потока.
-     */
-    void writeBytes(std::ofstream& output, const Byte* data, std::size_t size)
-    {
-        if (size == 0)
-        {
-            return;
-        }
-
-        output.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(size));
-        if (!output)
-        {
-            throw std::runtime_error("Cannot write output file");
-        }
-    }
-
-    /**
-     * Записывает накопленные байты Crypto++ фильтра в выходной файл.
-     */
-    void drainFilter(
-        CryptoPP::StreamTransformationFilter& filter,
-        std::ofstream& output,
-        HmacSha256* hmac)
-    {
-        std::array<Byte, BufferSize + CryptoPP::Blowfish::BLOCKSIZE> outputBuffer = {};
-
-        while (filter.MaxRetrievable() > 0)
-        {
-            const std::size_t chunkSize = static_cast<std::size_t>(
-                std::min<CryptoPP::lword>(filter.MaxRetrievable(), outputBuffer.size()));
-
-            const std::size_t readSize = filter.Get(outputBuffer.data(), chunkSize);
-
-            if (readSize > 0)
-            {
-                if (hmac != nullptr)
-                {
-                    hmac->update(outputBuffer.data(), readSize);
-                }
-
-                writeBytes(output, outputBuffer.data(), readSize);
-            }
-        }
-    }
-
-    /**
-     * Вычисляет HMAC-SHA256 для префикса файла заданной длины.
-     */
-    std::array<Byte, HmacSize> computeFilePrefixHmac(
-        const fs::path& inputPath,
-        std::uintmax_t prefixSize,
-        const std::array<Byte, HmacKeySize>& hmacKey)
+    std::vector<Byte> readAllBytes(const fs::path& inputPath)
     {
         std::ifstream input(inputPath, std::ios::binary);
         if (!input)
@@ -548,124 +292,44 @@ namespace
             throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
         }
 
-        HmacSha256 hmac(hmacKey);
-        std::array<Byte, BufferSize> buffer = {};
-        std::uintmax_t remainingSize = prefixSize;
-
-        while (remainingSize > 0)
+        input.seekg(0, std::ios::end);
+        const std::streamoff endPosition = input.tellg();
+        if (endPosition < 0)
         {
-            const std::size_t chunkSize = static_cast<std::size_t>(std::min<std::uintmax_t>(remainingSize, buffer.size()));
-            input.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(chunkSize));
+            throw std::runtime_error("Cannot determine input file size " + quotePath(inputPath));
+        }
 
-            if (input.gcount() != static_cast<std::streamsize>(chunkSize))
+        input.seekg(0, std::ios::beg);
+        std::vector<Byte> bytes(static_cast<std::size_t>(endPosition), 0);
+
+        if (!bytes.empty())
+        {
+            input.read(reinterpret_cast<char*>(bytes.data()), endPosition);
+            if (input.gcount() != endPosition)
             {
-                throw std::runtime_error("Cannot read bytes for HMAC validation");
+                throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
             }
-
-            hmac.update(buffer.data(), chunkSize);
-            remainingSize -= chunkSize;
         }
 
-        return hmac.final();
+        return bytes;
     }
 
-    /**
-     * Читает HMAC-SHA256 из хвоста файла.
-     */
-    std::array<Byte, HmacSize> readStoredHmac(const fs::path& inputPath, std::uintmax_t hmacOffset)
+    void writeAllBytes(const fs::path& outputPath, const std::vector<Byte>& bytes, bool force)
     {
-        std::ifstream input(inputPath, std::ios::binary);
-        if (!input)
-        {
-            throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
-        }
-
-        input.seekg(static_cast<std::streamoff>(hmacOffset), std::ios::beg);
-        if (!input)
-        {
-            throw std::runtime_error("Cannot seek to HMAC in input file");
-        }
-
-        std::array<Byte, HmacSize> hmac = {};
-        readExact(input, hmac.data(), hmac.size(), "HMAC");
-
-        return hmac;
-    }
-
-    /**
-     * Возвращает true, когда два HMAC равны при сравнении с постоянным временем.
-     */
-    bool hmacEquals(
-        const std::array<Byte, HmacSize>& left,
-        const std::array<Byte, HmacSize>& right)
-    {
-        return CryptoPP::VerifyBufsEqual(left.data(), right.data(), left.size());
-    }
-
-    /**
-     * Шифрует файл Blowfish-CBC и добавляет заголовок, salt, IV и HMAC-SHA256.
-     */
-    void encryptFile(
-        const fs::path& inputPath,
-        const fs::path& outputPath,
-        const std::wstring& password,
-        bool force)
-    {
-        validateFilePaths(inputPath, outputPath, force);
-
         const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
-
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
-        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
 
         try
         {
-            std::ifstream input(inputPath, std::ios::binary);
-            if (!input)
-            {
-                throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
-            }
-
             std::ofstream output(temporaryPath, std::ios::binary);
             if (!output)
             {
                 throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
             }
 
-            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Encryption encryption;
-            encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
-
-            CryptoPP::StreamTransformationFilter filter(
-                encryption,
-                nullptr,
-                CryptoPP::StreamTransformationFilter::NO_PADDING);
-
-            std::array<Byte, BufferSize> inputBuffer = {};
-
-            for (;;)
+            if (!bytes.empty())
             {
-                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(inputBuffer.size()));
-                const std::streamsize readSize = input.gcount();
-
-                if (readSize > 0)
-                {
-                    filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
-                    drainFilter(filter, output, nullptr);
-                }
-
-                if (input.eof())
-                {
-                    break;
-                }
-
-                if (!input)
-                {
-                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
-                }
+                output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
             }
-
-            filter.MessageEnd();
-            drainFilter(filter, output, nullptr);
 
             output.close();
             if (!output)
@@ -674,112 +338,410 @@ namespace
             }
 
             finalizeTemporaryOutput(temporaryPath, outputPath, force);
-            clearKeyMaterial(keyMaterial);
         }
         catch (...)
         {
-            clearKeyMaterial(keyMaterial);
             removeTemporaryOutput(temporaryPath);
             throw;
         }
     }
 
-    /**
-     * Расшифровывает файл Blowfish после проверки HMAC-SHA256.
-     */
-    void decryptFile(
-        const fs::path& inputPath,
-        const fs::path& outputPath,
-        const std::wstring& password,
-        bool force)
+    unsigned int parseHexDigit(wchar_t value)
     {
-        validateFilePaths(inputPath, outputPath, force);
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
-        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
-        const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
-
-        try
+        if (value >= L'0' && value <= L'9')
         {
-            std::ifstream input(inputPath, std::ios::binary);
-            if (!input)
-            {
-                throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
-            }
-
-            std::ofstream output(temporaryPath, std::ios::binary);
-            if (!output)
-            {
-                throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
-            }
-
-            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Decryption decryption;
-            decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
-
-            CryptoPP::StreamTransformationFilter filter(
-                decryption,
-                nullptr,
-                CryptoPP::StreamTransformationFilter::NO_PADDING);
-
-            std::array<Byte, BufferSize> inputBuffer = {};
-
-            for (;;)
-            {
-                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(inputBuffer.size()));
-                const std::streamsize readSize = input.gcount();
-
-                if (readSize > 0)
-                {
-                    filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
-                    drainFilter(filter, output, nullptr);
-                }
-
-                if (input.eof())
-                {
-                    break;
-                }
-
-                if (!input)
-                {
-                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
-                }
-            }
-
-            filter.MessageEnd();
-            drainFilter(filter, output, nullptr);
-
-            output.close();
-            if (!output)
-            {
-                throw std::runtime_error("Cannot finalize output file " + quotePath(temporaryPath));
-            }
-
-            finalizeTemporaryOutput(temporaryPath, outputPath, force);
-            clearKeyMaterial(keyMaterial);
+            return static_cast<unsigned int>(value - L'0');
         }
-        catch (...)
+
+        if (value >= L'a' && value <= L'f')
         {
-            clearKeyMaterial(keyMaterial);
-            removeTemporaryOutput(temporaryPath);
-            throw;
+            return static_cast<unsigned int>(value - L'a' + 10);
+        }
+
+        if (value >= L'A' && value <= L'F')
+        {
+            return static_cast<unsigned int>(value - L'A' + 10);
+        }
+
+        throw UsageError("IV must contain only hexadecimal characters");
+    }
+
+    std::array<Byte, IvSize> parseIvHex(std::wstring_view value)
+    {
+        std::wstring normalized;
+        normalized.reserve(value.size());
+
+        for (const wchar_t symbol : value)
+        {
+            if (std::iswspace(symbol) || symbol == L':' || symbol == L'-')
+            {
+                continue;
+            }
+
+            normalized.push_back(symbol);
+        }
+
+        if (normalized.size() != IvSize * 2)
+        {
+            throw UsageError("IV must contain exactly 16 hexadecimal characters");
+        }
+
+        std::array<Byte, IvSize> iv = {};
+        for (std::size_t index = 0; index < IvSize; ++index)
+        {
+            const unsigned int high = parseHexDigit(normalized[index * 2]);
+            const unsigned int low = parseHexDigit(normalized[index * 2 + 1]);
+            iv[index] = static_cast<Byte>((high << 4u) | low);
+        }
+
+        return iv;
+    }
+
+    std::wstring ivToHex(const std::array<Byte, IvSize>& iv)
+    {
+        static constexpr wchar_t Digits[] = L"0123456789ABCDEF";
+
+        std::wstring result;
+        result.reserve(iv.size() * 2);
+
+        for (const Byte byte : iv)
+        {
+            result.push_back(Digits[(byte >> 4u) & 0x0Fu]);
+            result.push_back(Digits[byte & 0x0Fu]);
+        }
+
+        return result;
+    }
+
+    std::vector<Byte> bytesFromRawKeyText(const std::wstring& keyText)
+    {
+        if (keyText.empty())
+        {
+            throw std::runtime_error("Key cannot be empty");
+        }
+
+        std::string keyUtf8 = toUtf8(keyText);
+        std::vector<Byte> keyBytes(keyUtf8.begin(), keyUtf8.end());
+        SecureZeroMemory(keyUtf8.data(), keyUtf8.size());
+
+        if (keyBytes.size() < blowfish::Blowfish::MinKeySize || keyBytes.size() > blowfish::Blowfish::MaxKeySize)
+        {
+            throw std::runtime_error("Raw key size must be from 4 to 56 bytes");
+        }
+
+        return keyBytes;
+    }
+
+    std::vector<Byte> padPkcs5(const std::vector<Byte>& input)
+    {
+        const std::size_t paddingLength = IvSize - (input.size() % IvSize);
+        std::vector<Byte> output = input;
+        output.insert(output.end(), paddingLength, static_cast<Byte>(paddingLength));
+        return output;
+    }
+
+    std::vector<Byte> unpadPkcs5(const std::vector<Byte>& input)
+    {
+        if (input.empty() || (input.size() % IvSize) != 0)
+        {
+            throw std::runtime_error("CBC ciphertext size must be a non-zero multiple of 8 bytes");
+        }
+
+        const Byte paddingLength = input.back();
+        if (paddingLength == 0 || paddingLength > IvSize || paddingLength > input.size())
+        {
+            throw std::runtime_error("Invalid PKCS5 padding");
+        }
+
+        const std::size_t start = input.size() - paddingLength;
+        for (std::size_t index = start; index < input.size(); ++index)
+        {
+            if (input[index] != paddingLength)
+            {
+                throw std::runtime_error("Invalid PKCS5 padding");
+            }
+        }
+
+        return std::vector<Byte>(input.begin(), input.begin() + static_cast<std::ptrdiff_t>(start));
+    }
+
+    std::array<Byte, IvSize> toBlock(std::span<const Byte> bytes)
+    {
+        if (bytes.size() != IvSize)
+        {
+            throw std::runtime_error("Internal block size mismatch");
+        }
+
+        std::array<Byte, IvSize> block = {};
+        std::copy(bytes.begin(), bytes.end(), block.begin());
+        return block;
+    }
+
+    void xorBlock(std::array<Byte, IvSize>& block, const std::array<Byte, IvSize>& other)
+    {
+        for (std::size_t index = 0; index < IvSize; ++index)
+        {
+            block[index] ^= other[index];
         }
     }
 
-    /**
-     * Устанавливает режим операции и запрещает указание нескольких режимов одновременно.
-     */
-    void setMode(Options& options, Mode mode)
+    std::vector<Byte> encryptCbc(
+        const std::vector<Byte>& plainBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
     {
-        if (options.mode != Mode::None && options.mode != mode)
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> paddedBytes = padPkcs5(plainBytes);
+        std::vector<Byte> output(paddedBytes.size(), 0);
+        std::array<Byte, IvSize> chain = iv;
+
+        for (std::size_t offset = 0; offset < paddedBytes.size(); offset += IvSize)
+        {
+            std::array<Byte, IvSize> block = toBlock(std::span<const Byte>(paddedBytes.data() + offset, IvSize));
+            xorBlock(block, chain);
+            cipher.encryptBlock(block);
+            std::copy(block.begin(), block.end(), output.begin() + static_cast<std::ptrdiff_t>(offset));
+            chain = block;
+        }
+
+        return output;
+    }
+
+    std::vector<Byte> decryptCbc(
+        const std::vector<Byte>& cipherBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
+    {
+        if (cipherBytes.empty() || (cipherBytes.size() % IvSize) != 0)
+        {
+            throw std::runtime_error("CBC ciphertext size must be a non-zero multiple of 8 bytes");
+        }
+
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> output(cipherBytes.size(), 0);
+        std::array<Byte, IvSize> chain = iv;
+
+        for (std::size_t offset = 0; offset < cipherBytes.size(); offset += IvSize)
+        {
+            const std::array<Byte, IvSize> currentCipherBlock =
+                toBlock(std::span<const Byte>(cipherBytes.data() + offset, IvSize));
+
+            std::array<Byte, IvSize> block = currentCipherBlock;
+            cipher.decryptBlock(block);
+            xorBlock(block, chain);
+            std::copy(block.begin(), block.end(), output.begin() + static_cast<std::ptrdiff_t>(offset));
+            chain = currentCipherBlock;
+        }
+
+        return unpadPkcs5(output);
+    }
+
+    std::vector<Byte> encryptCfb(
+        const std::vector<Byte>& plainBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
+    {
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> output(plainBytes.size(), 0);
+        std::array<Byte, IvSize> chain = iv;
+
+        std::size_t offset = 0;
+        while (offset < plainBytes.size())
+        {
+            std::array<Byte, IvSize> keystream = chain;
+            cipher.encryptBlock(keystream);
+
+            const std::size_t chunkSize = std::min<std::size_t>(IvSize, plainBytes.size() - offset);
+            for (std::size_t index = 0; index < chunkSize; ++index)
+            {
+                output[offset + index] = plainBytes[offset + index] ^ keystream[index];
+                chain[index] = output[offset + index];
+            }
+
+            offset += chunkSize;
+        }
+
+        return output;
+    }
+
+    std::vector<Byte> decryptCfb(
+        const std::vector<Byte>& cipherBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
+    {
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> output(cipherBytes.size(), 0);
+        std::array<Byte, IvSize> chain = iv;
+
+        std::size_t offset = 0;
+        while (offset < cipherBytes.size())
+        {
+            std::array<Byte, IvSize> keystream = chain;
+            cipher.encryptBlock(keystream);
+
+            const std::size_t chunkSize = std::min<std::size_t>(IvSize, cipherBytes.size() - offset);
+            for (std::size_t index = 0; index < chunkSize; ++index)
+            {
+                output[offset + index] = cipherBytes[offset + index] ^ keystream[index];
+                chain[index] = cipherBytes[offset + index];
+            }
+
+            offset += chunkSize;
+        }
+
+        return output;
+    }
+
+    std::vector<Byte> encryptPayload(
+        const std::vector<Byte>& plainBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv,
+        CipherMode cipherMode)
+    {
+        if (cipherMode == CipherMode::Cbc)
+        {
+            return encryptCbc(plainBytes, keyBytes, iv);
+        }
+
+        return encryptCfb(plainBytes, keyBytes, iv);
+    }
+
+    std::vector<Byte> decryptPayload(
+        const std::vector<Byte>& cipherBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv,
+        CipherMode cipherMode)
+    {
+        if (cipherMode == CipherMode::Cbc)
+        {
+            return decryptCbc(cipherBytes, keyBytes, iv);
+        }
+
+        return decryptCfb(cipherBytes, keyBytes, iv);
+    }
+
+    struct ParsedEncryptedFile
+    {
+        std::array<Byte, IvSize> iv = {};
+        std::vector<Byte> cipherBytes;
+    };
+
+    ParsedEncryptedFile parseEncryptedFile(
+        const std::vector<Byte>& fileBytes,
+        CipherMode cipherMode,
+        IvMode ivMode,
+        std::wstring_view ivHex)
+    {
+        ParsedEncryptedFile result;
+
+        if (ivMode == IvMode::Manual)
+        {
+            if (ivHex.empty())
+            {
+                throw UsageError("Manual IV mode requires --iv-hex <hex>");
+            }
+
+            result.iv = parseIvHex(ivHex);
+            result.cipherBytes = fileBytes;
+        }
+        else if (ivMode == IvMode::Prefix)
+        {
+            if (fileBytes.size() < IvSize)
+            {
+                throw std::runtime_error("Input file is too short to contain IV");
+            }
+
+            std::copy_n(fileBytes.begin(), IvSize, result.iv.begin());
+            result.cipherBytes.assign(fileBytes.begin() + static_cast<std::ptrdiff_t>(IvSize), fileBytes.end());
+        }
+        else
+        {
+            if (fileBytes.size() < IvSize)
+            {
+                throw std::runtime_error("Input file is too short to contain IV");
+            }
+
+            std::copy_n(fileBytes.end() - static_cast<std::ptrdiff_t>(IvSize), IvSize, result.iv.begin());
+            result.cipherBytes.assign(fileBytes.begin(), fileBytes.end() - static_cast<std::ptrdiff_t>(IvSize));
+        }
+
+        if (cipherMode == CipherMode::Cbc && (result.cipherBytes.empty() || (result.cipherBytes.size() % IvSize) != 0))
+        {
+            throw std::runtime_error("CBC ciphertext size must be a non-zero multiple of 8 bytes");
+        }
+
+        return result;
+    }
+
+    std::vector<Byte> composeEncryptedFile(
+        const std::vector<Byte>& cipherBytes,
+        const std::array<Byte, IvSize>& iv,
+        IvMode ivMode)
+    {
+        std::vector<Byte> output;
+        output.reserve(cipherBytes.size() + (ivMode == IvMode::Manual ? 0 : IvSize));
+
+        if (ivMode == IvMode::Prefix)
+        {
+            output.insert(output.end(), iv.begin(), iv.end());
+        }
+
+        output.insert(output.end(), cipherBytes.begin(), cipherBytes.end());
+
+        if (ivMode == IvMode::Suffix)
+        {
+            output.insert(output.end(), iv.begin(), iv.end());
+        }
+
+        return output;
+    }
+
+    fs::path makeAutomaticOutputPath(const fs::path& inputPath, OperationMode operation)
+    {
+        if (operation == OperationMode::Encrypt)
+        {
+            fs::path outputPath = inputPath;
+            outputPath += L".bf";
+            return outputPath;
+        }
+
+        if (extensionEquals(inputPath, L".bf"))
+        {
+            fs::path outputPath = inputPath;
+            outputPath.replace_extension(L"");
+            return outputPath;
+        }
+
+        fs::path outputPath = inputPath;
+        outputPath += L".ubf";
+        return outputPath;
+    }
+
+    void showErrorMessage(const std::wstring& message)
+    {
+        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONERROR);
+    }
+
+    void showSuccessMessage(const fs::path& inputPath, const fs::path& outputPath)
+    {
+        std::wstring message = L"Операция завершена.\n\nВход:\n";
+        message += inputPath.wstring();
+        message += L"\n\nВыход:\n";
+        message += outputPath.wstring();
+
+        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONINFORMATION);
+    }
+
+    void setMode(Options& options, OperationMode operation)
+    {
+        if (options.operation != OperationMode::None && options.operation != operation)
         {
             throw UsageError("Only one mode can be specified");
         }
 
-        options.mode = mode;
+        options.operation = operation;
     }
 
-    /**
-     * Возвращает следующий аргумент командной строки.
-     */
     std::wstring nextArgument(int& index, int argc, wchar_t** argv, std::wstring_view optionName)
     {
         if (index + 1 >= argc)
@@ -791,9 +753,45 @@ namespace
         return argv[index];
     }
 
-    /**
-     * Разбирает аргументы командной строки.
-     */
+    CipherMode parseCipherMode(std::wstring value)
+    {
+        value = toLower(std::move(value));
+
+        if (value == L"cbc")
+        {
+            return CipherMode::Cbc;
+        }
+
+        if (value == L"cfb")
+        {
+            return CipherMode::Cfb;
+        }
+
+        throw UsageError("Unsupported cipher mode. Use cbc or cfb");
+    }
+
+    IvMode parseIvMode(std::wstring value)
+    {
+        value = toLower(std::move(value));
+
+        if (value == L"prefix")
+        {
+            return IvMode::Prefix;
+        }
+
+        if (value == L"suffix")
+        {
+            return IvMode::Suffix;
+        }
+
+        if (value == L"manual")
+        {
+            return IvMode::Manual;
+        }
+
+        throw UsageError("Unsupported IV mode. Use prefix, suffix, or manual");
+    }
+
     Options parseOptions(int argc, wchar_t** argv)
     {
         Options options;
@@ -808,22 +806,22 @@ namespace
             }
             else if (argument == L"--encrypt")
             {
-                setMode(options, Mode::Encrypt);
+                setMode(options, OperationMode::Encrypt);
             }
             else if (argument == L"--decrypt")
             {
-                setMode(options, Mode::Decrypt);
+                setMode(options, OperationMode::Decrypt);
             }
             else if (argument == L"--shell-encrypt")
             {
                 options.shellMode = true;
-                setMode(options, Mode::Encrypt);
+                setMode(options, OperationMode::Encrypt);
                 options.inputPath = nextArgument(index, argc, argv, argument);
             }
             else if (argument == L"--shell-decrypt")
             {
                 options.shellMode = true;
-                setMode(options, Mode::Decrypt);
+                setMode(options, OperationMode::Decrypt);
                 options.inputPath = nextArgument(index, argc, argv, argument);
             }
             else if (argument == L"--input" || argument == L"-i")
@@ -836,11 +834,19 @@ namespace
             }
             else if (argument == L"--key" || argument == L"-k")
             {
-                options.password = nextArgument(index, argc, argv, argument);
+                options.keyText = nextArgument(index, argc, argv, argument);
             }
-            else if (argument == L"--ask-key")
+            else if (argument == L"--mode")
             {
-                options.askKey = true;
+                options.cipherMode = parseCipherMode(nextArgument(index, argc, argv, argument));
+            }
+            else if (argument == L"--iv-position")
+            {
+                options.ivMode = parseIvMode(nextArgument(index, argc, argv, argument));
+            }
+            else if (argument == L"--iv-hex")
+            {
+                options.ivHex = nextArgument(index, argc, argv, argument);
             }
             else if (argument == L"--force")
             {
@@ -855,73 +861,32 @@ namespace
         return options;
     }
 
-    /**
-     * Печатает справку CLI.
-     */
     void printHelp()
     {
         std::wcout
             << L"Blowfish\n\n"
             << L"Шифрование:\n"
-            << L"  Blowfish.exe --encrypt --input <file> --ask-key\n"
-            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n\n"
+            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n"
+            << L"  Blowfish.exe --encrypt -i <file> -k <key> --mode cbc --iv-position prefix\n\n"
             << L"Расшифрование:\n"
-            << L"  Blowfish.exe --decrypt --input <file> --ask-key\n"
-            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n\n"
-            << L"Выходной файл по умолчанию (если не указан --output):\n"
-            << L"  encrypt + .zip  -> .pack\n"
-            << L"  decrypt + .pack -> .zip\n"
-            << L"  encrypt         -> <input>.bf\n"
-            << L"  decrypt + .bf   -> убрать .bf\n"
-            << L"  decrypt         -> <input>.ubf\n\n"
+            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n"
+            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --mode cbc --iv-position suffix\n"
+            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --iv-position manual --iv-hex 0011223344556677\n\n"
             << L"Параметры:\n"
-            << L"  --output    путь выходного файла (необязательно)\n"
-            << L"  --force     перезаписывает существующий выходной файл\n"
-            << L"  --ask-key   запрашивает ключ в консоли без вывода символов\n"
-            << L"  --key       принимает ключ из аргумента командной строки\n"
-            << L"  --help      показывает эту справку\n";
+            << L"  --output         путь выходного файла (необязательно)\n"
+            << L"  --force          перезаписывает существующий выходной файл\n"
+            << L"  --key            raw key длиной от 4 до 56 байт\n"
+            << L"  --mode           cbc | cfb (по умолчанию cbc)\n"
+            << L"  --iv-position    prefix | suffix | manual (по умолчанию prefix)\n"
+            << L"  --iv-hex         IV в hex, обязателен для manual\n"
+            << L"  --help           показывает эту справку\n";
     }
 
-    /**
-     * Читает ключ из консоли без отображения введенных символов.
-     */
-    std::wstring readPasswordFromConsole()
-    {
-        std::wcout << L"Ключ: ";
-
-        HANDLE inputHandle = GetStdHandle(STD_INPUT_HANDLE);
-        DWORD originalMode = 0;
-        const bool canHideInput = inputHandle != INVALID_HANDLE_VALUE && GetConsoleMode(inputHandle, &originalMode);
-
-        if (canHideInput)
-        {
-            SetConsoleMode(inputHandle, originalMode & ~ENABLE_ECHO_INPUT);
-        }
-
-        std::wstring password;
-        std::getline(std::wcin, password);
-
-        if (canHideInput)
-        {
-            SetConsoleMode(inputHandle, originalMode);
-        }
-
-        std::wcout << L"\n";
-
-        return password;
-    }
-
-    /**
-     * Назначает стандартный GUI-шрифт указанному контролу.
-     */
     void setDefaultGuiFont(HWND handle)
     {
         SendMessageW(handle, WM_SETFONT, reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)), TRUE);
     }
 
-    /**
-     * Создает дочерний элемент окна и назначает ему стандартный GUI-шрифт.
-     */
     HWND createChildWindow(
         HWND parent,
         const wchar_t* className,
@@ -956,9 +921,15 @@ namespace
         return handle;
     }
 
-    /**
-     * Обрабатывает сообщения окна ввода ключа.
-     */
+    void updateDialogIvControls(KeyDialogState& state, HWND windowHandle)
+    {
+        const bool manualIv = IsDlgButtonChecked(windowHandle, IvManualId) == BST_CHECKED;
+        if (state.ivEditHandle != nullptr)
+        {
+            EnableWindow(state.ivEditHandle, manualIv ? TRUE : FALSE);
+        }
+    }
+
     LRESULT CALLBACK keyDialogProc(HWND windowHandle, UINT message, WPARAM wParam, LPARAM lParam)
     {
         KeyDialogState* state = reinterpret_cast<KeyDialogState*>(GetWindowLongPtrW(windowHandle, GWLP_USERDATA));
@@ -971,27 +942,63 @@ namespace
                 state = reinterpret_cast<KeyDialogState*>(createStruct->lpCreateParams);
                 SetWindowLongPtrW(windowHandle, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
 
-                createChildWindow(windowHandle, L"STATIC", L"Файл:", 0, 16, 16, 448, 18, FileStaticId);
-                createChildWindow(windowHandle, L"STATIC", state->filePath, SS_LEFTNOWORDWRAP, 16, 36, 448, 18, FileStaticId + 1);
-                createChildWindow(windowHandle, L"STATIC", L"Ключ:", 0, 16, 68, 448, 18, FileStaticId + 2);
+                createChildWindow(windowHandle, L"STATIC", L"Файл:", 0, 16, 16, 500, 18, FileStaticId);
+                createChildWindow(windowHandle, L"STATIC", state->filePath, SS_LEFTNOWORDWRAP, 16, 36, 500, 18, FileStaticId + 1);
+                createChildWindow(windowHandle, L"STATIC", L"Ключ:", 0, 16, 68, 500, 18, FileStaticId + 2);
 
-                state->editHandle = createChildWindow(
+                state->keyEditHandle = createChildWindow(
                     windowHandle,
                     L"EDIT",
-                    L"",
+                    state->keyText,
                     WS_BORDER | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
                     16,
                     88,
-                    448,
+                    500,
                     24,
                     KeyEditId);
 
-                SendMessageW(state->editHandle, EM_SETPASSWORDCHAR, L'*', 0);
+                SendMessageW(state->keyEditHandle, EM_SETPASSWORDCHAR, L'*', 0);
 
-                createChildWindow(windowHandle, L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 272, 126, 90, 28, IDOK);
-                createChildWindow(windowHandle, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 374, 126, 90, 28, IDCANCEL);
+                createChildWindow(windowHandle, L"BUTTON", L"Mode", BS_GROUPBOX, 16, 124, 240, 76, FileStaticId + 3);
+                createChildWindow(windowHandle, L"BUTTON", L"CBC", WS_TABSTOP | BS_AUTORADIOBUTTON, 28, 148, 80, 18, ModeCbcId);
+                createChildWindow(windowHandle, L"BUTTON", L"CFB", WS_TABSTOP | BS_AUTORADIOBUTTON, 28, 170, 80, 18, ModeCfbId);
 
-                SetFocus(state->editHandle);
+                createChildWindow(windowHandle, L"BUTTON", L"IV Position", BS_GROUPBOX, 276, 124, 240, 110, FileStaticId + 4);
+                createChildWindow(windowHandle, L"BUTTON", L"Prefix", WS_TABSTOP | BS_AUTORADIOBUTTON, 288, 148, 90, 18, IvPrefixId);
+                createChildWindow(windowHandle, L"BUTTON", L"Suffix", WS_TABSTOP | BS_AUTORADIOBUTTON, 288, 170, 90, 18, IvSuffixId);
+                createChildWindow(windowHandle, L"BUTTON", L"Manual", WS_TABSTOP | BS_AUTORADIOBUTTON, 288, 192, 90, 18, IvManualId);
+
+                createChildWindow(windowHandle, L"STATIC", L"IV hex:", 0, 16, 214, 60, 18, FileStaticId + 5);
+                state->ivEditHandle = createChildWindow(
+                    windowHandle,
+                    L"EDIT",
+                    state->ivHex,
+                    WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+                    76,
+                    212,
+                    440,
+                    24,
+                    IvEditId);
+
+                createChildWindow(windowHandle, L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 324, 252, 90, 28, IDOK);
+                createChildWindow(windowHandle, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 426, 252, 90, 28, IDCANCEL);
+
+                CheckRadioButton(windowHandle, ModeCbcId, ModeCfbId, state->cipherMode == CipherMode::Cfb ? ModeCfbId : ModeCbcId);
+
+                int checkedIvId = IvPrefixId;
+                if (state->ivMode == IvMode::Suffix)
+                {
+                    checkedIvId = IvSuffixId;
+                }
+                else if (state->ivMode == IvMode::Manual)
+                {
+                    checkedIvId = IvManualId;
+                }
+
+                CheckRadioButton(windowHandle, IvPrefixId, IvManualId, checkedIvId);
+                updateDialogIvControls(*state, windowHandle);
+
+                SetFocus(state->keyEditHandle);
                 return 0;
             }
 
@@ -999,26 +1006,72 @@ namespace
             {
                 const int commandId = LOWORD(wParam);
 
+                if (commandId == IvPrefixId || commandId == IvSuffixId || commandId == IvManualId)
+                {
+                    if (state != nullptr)
+                    {
+                        updateDialogIvControls(*state, windowHandle);
+                    }
+
+                    return 0;
+                }
+
                 if (commandId == IDOK)
                 {
-                    if (state == nullptr || state->editHandle == nullptr)
+                    if (state == nullptr || state->keyEditHandle == nullptr || state->ivEditHandle == nullptr)
                     {
                         DestroyWindow(windowHandle);
                         return 0;
                     }
 
-                    const int length = GetWindowTextLengthW(state->editHandle);
-                    std::wstring password(static_cast<std::size_t>(length) + 1, L'\0');
-                    GetWindowTextW(state->editHandle, password.data(), length + 1);
-                    password.resize(static_cast<std::size_t>(length));
+                    const int keyLength = GetWindowTextLengthW(state->keyEditHandle);
+                    std::wstring keyText(static_cast<std::size_t>(keyLength) + 1, L'\0');
+                    GetWindowTextW(state->keyEditHandle, keyText.data(), keyLength + 1);
+                    keyText.resize(static_cast<std::size_t>(keyLength));
 
-                    if (password.empty())
+                    if (keyText.empty())
                     {
                         MessageBoxW(windowHandle, L"Ключ не может быть пустым.", state->title.c_str(), MB_OK | MB_ICONERROR);
                         return 0;
                     }
 
-                    state->password = std::move(password);
+                    const int ivLength = GetWindowTextLengthW(state->ivEditHandle);
+                    std::wstring ivHex(static_cast<std::size_t>(ivLength) + 1, L'\0');
+                    GetWindowTextW(state->ivEditHandle, ivHex.data(), ivLength + 1);
+                    ivHex.resize(static_cast<std::size_t>(ivLength));
+
+                    state->keyText = std::move(keyText);
+                    state->ivHex = std::move(ivHex);
+                    state->cipherMode = IsDlgButtonChecked(windowHandle, ModeCfbId) == BST_CHECKED
+                        ? CipherMode::Cfb
+                        : CipherMode::Cbc;
+
+                    if (IsDlgButtonChecked(windowHandle, IvManualId) == BST_CHECKED)
+                    {
+                        state->ivMode = IvMode::Manual;
+                    }
+                    else if (IsDlgButtonChecked(windowHandle, IvSuffixId) == BST_CHECKED)
+                    {
+                        state->ivMode = IvMode::Suffix;
+                    }
+                    else
+                    {
+                        state->ivMode = IvMode::Prefix;
+                    }
+
+                    if (state->ivMode == IvMode::Manual)
+                    {
+                        try
+                        {
+                            static_cast<void>(parseIvHex(state->ivHex));
+                        }
+                        catch (const std::exception& exception)
+                        {
+                            MessageBoxW(windowHandle, fromUtf8(exception.what()).c_str(), state->title.c_str(), MB_OK | MB_ICONERROR);
+                            return 0;
+                        }
+                    }
+
                     state->accepted = true;
                     DestroyWindow(windowHandle);
                     return 0;
@@ -1048,9 +1101,6 @@ namespace
         return DefWindowProcW(windowHandle, message, wParam, lParam);
     }
 
-    /**
-     * Регистрирует класс окна ввода ключа.
-     */
     void registerKeyDialogClass()
     {
         const wchar_t* className = L"BlowfishKeyDialog";
@@ -1077,24 +1127,25 @@ namespace
         }
     }
 
-    /**
-     * Показывает модальное окно ввода ключа.
-     */
-    bool promptPasswordWithDialog(const std::wstring& title, const fs::path& inputPath, std::wstring& password)
+    bool promptOptionsWithDialog(const std::wstring& title, const fs::path& inputPath, Options& options)
     {
         registerKeyDialogClass();
 
         RECT workArea = {};
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
 
-        constexpr int width = 500;
-        constexpr int height = 204;
+        constexpr int width = 550;
+        constexpr int height = 340;
         const int x = workArea.left + ((workArea.right - workArea.left) - width) / 2;
         const int y = workArea.top + ((workArea.bottom - workArea.top) - height) / 2;
 
         KeyDialogState state;
         state.title = title;
         state.filePath = inputPath.wstring();
+        state.keyText = options.keyText;
+        state.ivHex = options.ivHex;
+        state.cipherMode = options.cipherMode;
+        state.ivMode = options.ivMode;
 
         HWND windowHandle = CreateWindowExW(
             WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
@@ -1141,164 +1192,113 @@ namespace
             }
         }
 
-        if (state.accepted)
+        if (!state.accepted)
         {
-            password = std::move(state.password);
-            return true;
+            return false;
         }
 
-        return false;
+        options.keyText = std::move(state.keyText);
+        options.ivHex = std::move(state.ivHex);
+        options.cipherMode = state.cipherMode;
+        options.ivMode = state.ivMode;
+        return true;
     }
 
-    std::wstring toLower(std::wstring value)
+    void executeEncrypt(const Options& options)
     {
-        std::transform(
-            value.begin(),
-            value.end(),
-            value.begin(),
-            [](const wchar_t symbol)
-            {
-                return static_cast<wchar_t>(std::towlower(symbol));
-            });
+        validateFilePaths(options.inputPath, options.outputPath, options.force);
 
-        return value;
+        std::vector<Byte> keyBytes = bytesFromRawKeyText(options.keyText);
+        std::vector<Byte> plainBytes = readAllBytes(options.inputPath);
+
+        const std::array<Byte, IvSize> iv = options.ivHex.empty()
+            ? randomBytes<IvSize>()
+            : parseIvHex(options.ivHex);
+
+        const std::vector<Byte> cipherBytes = encryptPayload(plainBytes, keyBytes, iv, options.cipherMode);
+        const std::vector<Byte> outputBytes = composeEncryptedFile(cipherBytes, iv, options.ivMode);
+
+        writeAllBytes(options.outputPath, outputBytes, options.force);
+
+        SecureZeroMemory(keyBytes.data(), keyBytes.size());
     }
 
-    bool extensionEquals(const fs::path& path, std::wstring_view extension)
+    void executeDecrypt(const Options& options)
     {
-        return toLower(path.extension().wstring()) == toLower(std::wstring(extension));
+        validateFilePaths(options.inputPath, options.outputPath, options.force);
+
+        std::vector<Byte> keyBytes = bytesFromRawKeyText(options.keyText);
+        const std::vector<Byte> fileBytes = readAllBytes(options.inputPath);
+        const ParsedEncryptedFile parsed = parseEncryptedFile(fileBytes, options.cipherMode, options.ivMode, options.ivHex);
+        const std::vector<Byte> plainBytes = decryptPayload(parsed.cipherBytes, keyBytes, parsed.iv, options.cipherMode);
+
+        writeAllBytes(options.outputPath, plainBytes, options.force);
+
+        SecureZeroMemory(keyBytes.data(), keyBytes.size());
     }
 
-    /**
-     * Возвращает выходной путь по умолчанию, если --output не указан.
-     */
-    fs::path makeAutomaticOutputPath(const fs::path& inputPath, Mode mode)
+    int executeShellMode(Options& options)
     {
-        auto replaceExtension = [&](std::wstring_view extension)
-        {
-            fs::path outputPath = inputPath;
-            outputPath.replace_extension(extension);
-            return outputPath;
-        };
+        options.outputPath = makeAutomaticOutputPath(options.inputPath, options.operation);
 
-        if (mode == Mode::Encrypt)
-        {
-            if (extensionEquals(inputPath, L".zip"))
-            {
-                return replaceExtension(L".pack");
-            }
-
-            fs::path outputPath = inputPath;
-            outputPath += L".bf";
-            return outputPath;
-        }
-
-        if (extensionEquals(inputPath, L".pack"))
-        {
-            return replaceExtension(L".zip");
-        }
-
-        if (extensionEquals(inputPath, L".bf"))
-        {
-            return replaceExtension(L"");
-        }
-
-        fs::path outputPath = inputPath;
-        outputPath += L".ubf";
-        return outputPath;
-    }
-
-    /**
-     * Показывает сообщение об ошибке.
-     */
-    void showErrorMessage(const std::wstring& message)
-    {
-        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONERROR);
-    }
-
-    /**
-     * Показывает сообщение об успешном завершении операции.
-     */
-    void showSuccessMessage(const fs::path& inputPath, const fs::path& outputPath)
-    {
-        std::wstring message = L"Операция завершена.\n\nВход:\n";
-        message += inputPath.wstring();
-        message += L"\n\nВыход:\n";
-        message += outputPath.wstring();
-
-        MessageBoxW(nullptr, message.c_str(), L"Blowfish", MB_OK | MB_ICONINFORMATION);
-    }
-
-    /**
-     * Выполняет операцию, запущенную из контекстного меню Windows.
-     */
-    int executeShellMode(const Options& options)
-    {
-        const fs::path outputPath = makeAutomaticOutputPath(options.inputPath, options.mode);
-
-        std::wstring password;
-        const std::wstring title = options.mode == Mode::Encrypt
+        const std::wstring title = options.operation == OperationMode::Encrypt
             ? L"Blowfish Encrypt"
             : L"Blowfish Decrypt";
 
-        if (!promptPasswordWithDialog(title, options.inputPath, password))
+        if (!promptOptionsWithDialog(title, options.inputPath, options))
         {
             return 2;
         }
 
-        if (options.mode == Mode::Encrypt)
+        if (options.operation == OperationMode::Encrypt)
         {
-            encryptFile(options.inputPath, outputPath, password, false);
+            executeEncrypt(options);
         }
         else
         {
-            decryptFile(options.inputPath, outputPath, password, false);
+            executeDecrypt(options);
         }
 
-        SecureZeroMemory(password.data(), password.size() * sizeof(wchar_t));
-        showSuccessMessage(options.inputPath, outputPath);
+        if (!options.keyText.empty())
+        {
+            SecureZeroMemory(options.keyText.data(), options.keyText.size() * sizeof(wchar_t));
+        }
 
+        showSuccessMessage(options.inputPath, options.outputPath);
         return 0;
     }
 
-    /**
-     * Выполняет операцию, запущенную из консоли.
-     */
     int executeConsoleMode(Options& options)
     {
         if (options.outputPath.empty())
         {
-            options.outputPath = makeAutomaticOutputPath(options.inputPath, options.mode);
+            options.outputPath = makeAutomaticOutputPath(options.inputPath, options.operation);
         }
 
-        if (options.password.empty() && options.askKey)
+        if (options.keyText.empty())
         {
-            options.password = readPasswordFromConsole();
+            throw UsageError("Key is required. Use --key <value>");
         }
 
-        if (options.password.empty())
+        if (options.ivMode == IvMode::Manual && options.ivHex.empty())
         {
-            throw UsageError("Key is required. Use --ask-key or --key <value>");
+            throw UsageError("Manual IV mode requires --iv-hex <hex>");
         }
 
-        if (options.mode == Mode::Encrypt)
+        if (options.operation == OperationMode::Encrypt)
         {
-            encryptFile(options.inputPath, options.outputPath, options.password, options.force);
+            executeEncrypt(options);
         }
         else
         {
-            decryptFile(options.inputPath, options.outputPath, options.password, options.force);
+            executeDecrypt(options);
         }
 
-        SecureZeroMemory(options.password.data(), options.password.size() * sizeof(wchar_t));
-
+        SecureZeroMemory(options.keyText.data(), options.keyText.size() * sizeof(wchar_t));
         std::wcout << L"Готово: " << options.outputPath.wstring() << L"\n";
         return 0;
     }
 
-    /**
-     * Проверяет обязательные параметры и запускает выбранный режим.
-     */
     int execute(Options& options)
     {
         if (options.help)
@@ -1307,7 +1307,7 @@ namespace
             return 0;
         }
 
-        if (options.mode == Mode::None)
+        if (options.operation == OperationMode::None)
         {
             throw UsageError("Mode is required: --encrypt or --decrypt");
         }
@@ -1326,9 +1326,6 @@ namespace
     }
 }
 
-/**
- * Точка входа приложения Blowfish.
- */
 int wmain(int argc, wchar_t** argv)
 {
     configureConsole();
@@ -1337,6 +1334,7 @@ int wmain(int argc, wchar_t** argv)
 
     try
     {
+        blowfish::Blowfish::selfTest();
         options = parseOptions(argc, argv);
         return execute(options);
     }

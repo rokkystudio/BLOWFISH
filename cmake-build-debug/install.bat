@@ -83,9 +83,6 @@ if exist "%IE4UINIT%" (
     "%IE4UINIT%" -ClearIconCache >nul 2>&1
     "%IE4UINIT%" -show >nul 2>&1
 )
-taskkill /IM explorer.exe /F >nul 2>&1
-start "" explorer.exe >nul 2>&1
-timeout /t 2 /nobreak >nul
 exit /b 0
 
 :notify
