@@ -863,23 +863,23 @@ namespace
 
     void printHelp()
     {
-        std::wcout
-            << L"Blowfish\n\n"
-            << L"Шифрование:\n"
-            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n"
-            << L"  Blowfish.exe --encrypt -i <file> -k <key> --mode cbc --iv-position prefix\n\n"
-            << L"Расшифрование:\n"
-            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n"
-            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --mode cbc --iv-position suffix\n"
-            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --iv-position manual --iv-hex 0011223344556677\n\n"
-            << L"Параметры:\n"
-            << L"  --output         путь выходного файла (необязательно)\n"
-            << L"  --force          перезаписывает существующий выходной файл\n"
-            << L"  --key            raw key длиной от 4 до 56 байт\n"
-            << L"  --mode           cbc | cfb (по умолчанию cbc)\n"
-            << L"  --iv-position    prefix | suffix | manual (по умолчанию prefix)\n"
-            << L"  --iv-hex         IV в hex, обязателен для manual\n"
-            << L"  --help           показывает эту справку\n";
+        std::cout
+            << "Blowfish\n\n"
+            << toUtf8(L"Шифрование:\n")
+            << "  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n"
+            << "  Blowfish.exe --encrypt -i <file> -k <key> --mode cbc --iv-position prefix\n\n"
+            << toUtf8(L"Расшифрование:\n")
+            << "  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n"
+            << "  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --mode cbc --iv-position suffix\n"
+            << "  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --iv-position manual --iv-hex 0011223344556677\n\n"
+            << toUtf8(L"Параметры:\n")
+            << toUtf8(L"  --output         путь выходного файла (необязательно)\n")
+            << toUtf8(L"  --force          перезаписывает существующий выходной файл\n")
+            << toUtf8(L"  --key            raw key длиной от 4 до 56 байт\n")
+            << toUtf8(L"  --mode           cbc | cfb (по умолчанию cbc)\n")
+            << toUtf8(L"  --iv-position    prefix | suffix | manual (по умолчанию prefix)\n")
+            << toUtf8(L"  --iv-hex         IV в hex, обязателен для manual\n")
+            << toUtf8(L"  --help           показывает эту справку\n");
     }
 
     void setDefaultGuiFont(HWND handle)
