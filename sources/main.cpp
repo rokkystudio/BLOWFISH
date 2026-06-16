@@ -34,10 +34,12 @@ namespace
     constexpr int KeyEditId = 1002;
     constexpr int ModeCbcId = 1003;
     constexpr int ModeCfbId = 1004;
-    constexpr int IvPrefixId = 1005;
-    constexpr int IvSuffixId = 1006;
-    constexpr int IvManualId = 1007;
-    constexpr int IvEditId = 1008;
+    constexpr int ModeOfbId = 1005;
+    constexpr int ModeCtrId = 1006;
+    constexpr int IvPrefixId = 1007;
+    constexpr int IvSuffixId = 1008;
+    constexpr int IvManualId = 1009;
+    constexpr int IvEditId = 1010;
 
     enum class OperationMode
     {
@@ -49,7 +51,9 @@ namespace
     enum class CipherMode
     {
         Cbc,
-        Cfb
+        Cfb,
+        Ofb,
+        Ctr
     };
 
     enum class IvMode
@@ -465,6 +469,18 @@ namespace
         return std::vector<Byte>(input.begin(), input.begin() + static_cast<std::ptrdiff_t>(start));
     }
 
+    std::vector<Byte> tryUnpadPkcs5OrReturnRaw(const std::vector<Byte>& input)
+    {
+        try
+        {
+            return unpadPkcs5(input);
+        }
+        catch (const std::exception&)
+        {
+            return input;
+        }
+    }
+
     std::array<Byte, IvSize> toBlock(std::span<const Byte> bytes)
     {
         if (bytes.size() != IvSize)
@@ -482,6 +498,19 @@ namespace
         for (std::size_t index = 0; index < IvSize; ++index)
         {
             block[index] ^= other[index];
+        }
+    }
+
+    void incrementCounter(std::array<Byte, IvSize>& counter)
+    {
+        for (std::size_t index = counter.size(); index > 0; --index)
+        {
+            Byte& value = counter[index - 1];
+            ++value;
+            if (value != 0)
+            {
+                break;
+            }
         }
     }
 
@@ -533,7 +562,7 @@ namespace
             chain = currentCipherBlock;
         }
 
-        return unpadPkcs5(output);
+        return tryUnpadPkcs5OrReturnRaw(output);
     }
 
     std::vector<Byte> encryptCfb(
@@ -592,6 +621,60 @@ namespace
         return output;
     }
 
+    std::vector<Byte> applyOfb(
+        const std::vector<Byte>& inputBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
+    {
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> output(inputBytes.size(), 0);
+        std::array<Byte, IvSize> feedback = iv;
+
+        std::size_t offset = 0;
+        while (offset < inputBytes.size())
+        {
+            cipher.encryptBlock(feedback);
+
+            const std::size_t chunkSize = std::min<std::size_t>(IvSize, inputBytes.size() - offset);
+            for (std::size_t index = 0; index < chunkSize; ++index)
+            {
+                output[offset + index] = inputBytes[offset + index] ^ feedback[index];
+            }
+
+            offset += chunkSize;
+        }
+
+        return output;
+    }
+
+    std::vector<Byte> applyCtr(
+        const std::vector<Byte>& inputBytes,
+        const std::vector<Byte>& keyBytes,
+        const std::array<Byte, IvSize>& iv)
+    {
+        blowfish::Blowfish cipher(keyBytes);
+        std::vector<Byte> output(inputBytes.size(), 0);
+        std::array<Byte, IvSize> counter = iv;
+
+        std::size_t offset = 0;
+        while (offset < inputBytes.size())
+        {
+            std::array<Byte, IvSize> keystream = counter;
+            cipher.encryptBlock(keystream);
+
+            const std::size_t chunkSize = std::min<std::size_t>(IvSize, inputBytes.size() - offset);
+            for (std::size_t index = 0; index < chunkSize; ++index)
+            {
+                output[offset + index] = inputBytes[offset + index] ^ keystream[index];
+            }
+
+            incrementCounter(counter);
+            offset += chunkSize;
+        }
+
+        return output;
+    }
+
     std::vector<Byte> encryptPayload(
         const std::vector<Byte>& plainBytes,
         const std::vector<Byte>& keyBytes,
@@ -603,7 +686,17 @@ namespace
             return encryptCbc(plainBytes, keyBytes, iv);
         }
 
-        return encryptCfb(plainBytes, keyBytes, iv);
+        if (cipherMode == CipherMode::Cfb)
+        {
+            return encryptCfb(plainBytes, keyBytes, iv);
+        }
+
+        if (cipherMode == CipherMode::Ofb)
+        {
+            return applyOfb(plainBytes, keyBytes, iv);
+        }
+
+        return applyCtr(plainBytes, keyBytes, iv);
     }
 
     std::vector<Byte> decryptPayload(
@@ -617,7 +710,17 @@ namespace
             return decryptCbc(cipherBytes, keyBytes, iv);
         }
 
-        return decryptCfb(cipherBytes, keyBytes, iv);
+        if (cipherMode == CipherMode::Cfb)
+        {
+            return decryptCfb(cipherBytes, keyBytes, iv);
+        }
+
+        if (cipherMode == CipherMode::Ofb)
+        {
+            return applyOfb(cipherBytes, keyBytes, iv);
+        }
+
+        return applyCtr(cipherBytes, keyBytes, iv);
     }
 
     struct ParsedEncryptedFile
@@ -767,7 +870,17 @@ namespace
             return CipherMode::Cfb;
         }
 
-        throw UsageError("Unsupported cipher mode. Use cbc or cfb");
+        if (value == L"ofb")
+        {
+            return CipherMode::Ofb;
+        }
+
+        if (value == L"ctr")
+        {
+            return CipherMode::Ctr;
+        }
+
+        throw UsageError("Unsupported cipher mode. Use cbc, cfb, ofb, or ctr");
     }
 
     IvMode parseIvMode(std::wstring value)
@@ -867,7 +980,8 @@ namespace
             << "Blowfish\n\n"
             << toUtf8(L"Шифрование:\n")
             << "  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n"
-            << "  Blowfish.exe --encrypt -i <file> -k <key> --mode cbc --iv-position prefix\n\n"
+            << "  Blowfish.exe --encrypt -i <file> -k <key> --mode cbc --iv-position prefix\n"
+            << "  Blowfish.exe --encrypt -i <file> -k <key> --mode ctr --iv-position suffix\n\n"
             << toUtf8(L"Расшифрование:\n")
             << "  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n"
             << "  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --mode cbc --iv-position suffix\n"
@@ -876,7 +990,7 @@ namespace
             << toUtf8(L"  --output         путь выходного файла (необязательно)\n")
             << toUtf8(L"  --force          перезаписывает существующий выходной файл\n")
             << toUtf8(L"  --key            raw key длиной от 4 до 56 байт\n")
-            << toUtf8(L"  --mode           cbc | cfb (по умолчанию cbc)\n")
+            << toUtf8(L"  --mode           cbc | cfb | ofb | ctr (по умолчанию cbc)\n")
             << toUtf8(L"  --iv-position    prefix | suffix | manual (по умолчанию prefix)\n")
             << toUtf8(L"  --iv-hex         IV в hex, обязателен для manual\n")
             << toUtf8(L"  --help           показывает эту справку\n");
@@ -959,9 +1073,11 @@ namespace
 
                 SendMessageW(state->keyEditHandle, EM_SETPASSWORDCHAR, L'*', 0);
 
-                createChildWindow(windowHandle, L"BUTTON", L"Mode", BS_GROUPBOX, 16, 124, 240, 76, FileStaticId + 3);
+                createChildWindow(windowHandle, L"BUTTON", L"Mode", BS_GROUPBOX, 16, 124, 240, 108, FileStaticId + 3);
                 createChildWindow(windowHandle, L"BUTTON", L"CBC", WS_TABSTOP | BS_AUTORADIOBUTTON, 28, 148, 80, 18, ModeCbcId);
                 createChildWindow(windowHandle, L"BUTTON", L"CFB", WS_TABSTOP | BS_AUTORADIOBUTTON, 28, 170, 80, 18, ModeCfbId);
+                createChildWindow(windowHandle, L"BUTTON", L"OFB", WS_TABSTOP | BS_AUTORADIOBUTTON, 136, 148, 80, 18, ModeOfbId);
+                createChildWindow(windowHandle, L"BUTTON", L"CTR", WS_TABSTOP | BS_AUTORADIOBUTTON, 136, 170, 80, 18, ModeCtrId);
 
                 createChildWindow(windowHandle, L"BUTTON", L"IV Position", BS_GROUPBOX, 276, 124, 240, 110, FileStaticId + 4);
                 createChildWindow(windowHandle, L"BUTTON", L"Prefix", WS_TABSTOP | BS_AUTORADIOBUTTON, 288, 148, 90, 18, IvPrefixId);
@@ -983,7 +1099,21 @@ namespace
                 createChildWindow(windowHandle, L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 324, 252, 90, 28, IDOK);
                 createChildWindow(windowHandle, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 426, 252, 90, 28, IDCANCEL);
 
-                CheckRadioButton(windowHandle, ModeCbcId, ModeCfbId, state->cipherMode == CipherMode::Cfb ? ModeCfbId : ModeCbcId);
+                int checkedModeId = ModeCbcId;
+                if (state->cipherMode == CipherMode::Cfb)
+                {
+                    checkedModeId = ModeCfbId;
+                }
+                else if (state->cipherMode == CipherMode::Ofb)
+                {
+                    checkedModeId = ModeOfbId;
+                }
+                else if (state->cipherMode == CipherMode::Ctr)
+                {
+                    checkedModeId = ModeCtrId;
+                }
+
+                CheckRadioButton(windowHandle, ModeCbcId, ModeCtrId, checkedModeId);
 
                 int checkedIvId = IvPrefixId;
                 if (state->ivMode == IvMode::Suffix)
@@ -1042,9 +1172,22 @@ namespace
 
                     state->keyText = std::move(keyText);
                     state->ivHex = std::move(ivHex);
-                    state->cipherMode = IsDlgButtonChecked(windowHandle, ModeCfbId) == BST_CHECKED
-                        ? CipherMode::Cfb
-                        : CipherMode::Cbc;
+                    if (IsDlgButtonChecked(windowHandle, ModeCfbId) == BST_CHECKED)
+                    {
+                        state->cipherMode = CipherMode::Cfb;
+                    }
+                    else if (IsDlgButtonChecked(windowHandle, ModeOfbId) == BST_CHECKED)
+                    {
+                        state->cipherMode = CipherMode::Ofb;
+                    }
+                    else if (IsDlgButtonChecked(windowHandle, ModeCtrId) == BST_CHECKED)
+                    {
+                        state->cipherMode = CipherMode::Ctr;
+                    }
+                    else
+                    {
+                        state->cipherMode = CipherMode::Cbc;
+                    }
 
                     if (IsDlgButtonChecked(windowHandle, IvManualId) == BST_CHECKED)
                     {

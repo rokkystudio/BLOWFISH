@@ -1,23 +1,27 @@
 # Blowfish
 
 `Blowfish` — консольная Windows-программа для шифрования и расшифрования файлов
-алгоритмом Blowfish с собственным локальным движком, без `Crypto++`, `OpenSSL`,
-`PBKDF2` и парольной обвязки.
+на локальной реализации `Blowfish`, без `Crypto++`, `OpenSSL`, `PBKDF2`,
+`HMAC`, magic bytes и контейнерного формата.
 
-Программа работает только с raw key.
+Программа работает с `raw key`: ключ берется как есть из введенного текста.
 
-Папка `sources/cryptopp` остаётся в репозитории. Сейчас библиотека не участвует
-в сборке и не нужна для текущей реализации, но её сохраняем на случай будущих
-задач.
+Папка `sources/cryptopp` остается в репозитории, но в текущей реализации и
+сборке не используется.
 
 ## Что умеет
 
-- `CBC` и `CFB`
-- `IV` в начале файла
-- `IV` в конце файла
-- `IV` вручную, без хранения в файле
-- запуск из консоли
-- запуск из контекстного меню Проводника
+- режимы `CBC`, `CFB`, `OFB`, `CTR`
+- выбор режима через CLI
+- выбор режима через Win32-окно из контекстного меню
+- три схемы хранения `IV`: `prefix`, `suffix`, `manual`
+- автоматическая генерация `IV`, если он не передан вручную
+- raw-формат файла без сигнатур и служебных заголовков
+
+По умолчанию:
+
+- `mode = cbc`
+- `iv-position = prefix`
 
 ## Формат данных
 
@@ -27,45 +31,72 @@
 
 - `prefix`: `[IV][ciphertext]`
 - `suffix`: `[ciphertext][IV]`
-- `manual`: `[ciphertext]`, а `IV` передаётся отдельно
+- `manual`: `[ciphertext]`, а `IV` задается отдельно
 
-Для `CBC` используется `PKCS#5/PKCS#7` padding.
+Программа намеренно не добавляет в файл:
 
-Для `CFB` padding не используется.
+- magic bytes
+- заголовки формата
+- метаданные о режиме шифрования
+- проверку целостности
+- `base64`
 
-Никаких специальных заголовков, `base64`, `HMAC`, `PBKDF2`, magic bytes или
-форматных контейнеров программа не добавляет.
+Из этого следует важное свойство: для расшифрования нужно знать тот же набор
+параметров, что использовался при шифровании:
+
+- ключ
+- режим (`CBC` / `CFB` / `OFB` / `CTR`)
+- способ хранения `IV`
+- сам `IV`, если использовался `manual`
+
+Если ключ, режим или `IV` неверны, программа не пытается это детектировать по
+сигнатурам файла. На выходе получится неверно расшифрованный набор байтов.
+
+## Поведение режимов
+
+- `CBC` использует `PKCS#5/PKCS#7` padding при шифровании.
+- `CFB`, `OFB` и `CTR` работают без padding.
+- При расшифровании `CBC` программа пытается снять padding. Если padding не
+  похож на корректный, данные возвращаются как есть, без ошибки формата. Это
+  сделано специально, чтобы неправильный ключ не выдавал наличие служебной
+  структуры файла.
 
 ## Использование из консоли
 
-Шифрование:
+Базовое шифрование с настройками по умолчанию:
 
 ```powershell
 .\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.bf" -k "16wmCCdPx7NOLG3"
 ```
 
-Шифрование `CBC` с `IV` в начале файла:
+`CBC` с `IV` в начале файла:
 
 ```powershell
 .\Blowfish.exe --encrypt -i "C:\Data\bundle.json" -o "C:\Data\hide.dat" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position prefix
 ```
 
-Расшифрование `CBC` с `IV` в конце файла:
+`CFB` с `IV` в конце файла:
 
 ```powershell
-.\Blowfish.exe --decrypt -i "C:\Data\file.dat" -o "C:\Data\file.json" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position suffix
+.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.cfb" -k "16wmCCdPx7NOLG3" --mode cfb --iv-position suffix
+```
+
+`OFB`:
+
+```powershell
+.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.ofb" -k "16wmCCdPx7NOLG3" --mode ofb --iv-position prefix
+```
+
+`CTR`:
+
+```powershell
+.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.ctr" -k "16wmCCdPx7NOLG3" --mode ctr --iv-position prefix
 ```
 
 Расшифрование с ручным `IV`:
 
 ```powershell
 .\Blowfish.exe --decrypt -i "C:\Data\file.bin" -o "C:\Data\file.txt" -k "16wmCCdPx7NOLG3" --mode cbc --iv-position manual --iv-hex 0011223344556677
-```
-
-`CFB`:
-
-```powershell
-.\Blowfish.exe --encrypt -i "C:\Data\file.txt" -o "C:\Data\file.cfb" -k "16wmCCdPx7NOLG3" --mode cfb --iv-position prefix
 ```
 
 ## Параметры CLI
@@ -75,16 +106,11 @@
 - `--input` / `-i`
 - `--output` / `-o`
 - `--key` / `-k`
-- `--mode cbc|cfb`
+- `--mode cbc|cfb|ofb|ctr`
 - `--iv-position prefix|suffix|manual`
 - `--iv-hex`
 - `--force`
 - `--help`
-
-По умолчанию:
-
-- `mode = cbc`
-- `iv-position = prefix`
 
 Если `--output` не задан:
 
@@ -94,7 +120,7 @@
 
 ## Контекстное меню
 
-После сборки CMake публикует в папку `build`:
+После сборки CMake публикует:
 
 - `build\Blowfish.exe`
 - `build\install.bat`
@@ -112,32 +138,31 @@
 .\build\uninstall.bat
 ```
 
-При запуске из контекстного меню открывается окно, где пользователь задаёт:
+При запуске из контекстного меню открывается окно, где можно задать:
 
-- raw key
-- `mode`: `CBC` или `CFB`
-- `iv-position`: `prefix`, `suffix` или `manual`
+- `raw key`
+- `mode`: `CBC`, `CFB`, `OFB`, `CTR`
+- `iv-position`: `prefix`, `suffix`, `manual`
 - `IV hex`, если выбран `manual`
 
-То есть GUI не скрывает эти параметры и не подставляет старую парольную модель.
+GUI не подставляет скрытую парольную модель и не записывает в файл служебную
+сигнатуру режима.
 
 ## Сборка
 
-Обычная сборка:
+Проект собирается на локальной реализации Blowfish из:
 
-```powershell
-cmake -S . -B cmake-build-debug
-cmake --build cmake-build-debug --target Blowfish
-```
+- `sources/blowfish.h`
+- `sources/blowfish.cpp`
 
-Проект собирается на встроенном локальном движке Blowfish из:
-
-- [sources/blowfish.h](/D:/PROJECTS/BLOWFISH/sources/blowfish.h)
-- [sources/blowfish.cpp](/D:/PROJECTS/BLOWFISH/sources/blowfish.cpp)
+Текущая CMake-конфигурация линкует `bcrypt` только для генерации случайного
+`IV` через системный RNG Windows.
 
 ## Ограничения
 
-- Blowfish имеет блок `64` бита, это старый алгоритм.
-- Проверки целостности в формате нет.
-- При неверном ключе или `IV` расшифровка может дать мусор, а в `CBC` также
-  может завершиться ошибкой padding.
+- Blowfish использует блок `64` бита и считается устаревшим алгоритмом.
+- В формате нет проверки целостности.
+- Для расшифрования нужно вручную знать режим и схему хранения `IV`.
+- При неверном ключе, неверном режиме или неверном `IV` результатом будет
+  неправильный набор байтов без надежного способа отличить его от корректного
+  по самому файлу.
