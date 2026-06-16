@@ -37,14 +37,14 @@ namespace
 {
     using Byte = CryptoPP::byte;
 
-    constexpr std::array<Byte, 4> FileMagic = { 'B', 'F', 'W', '2' };
+    constexpr std::array<Byte, 4> FileMagic = { 'B', 'F', 'W', '3' };
     constexpr unsigned int KdfIterations = 310000;
     constexpr std::size_t SaltSize = 16;
     constexpr std::size_t IvSize = CryptoPP::Blowfish::BLOCKSIZE;
     constexpr std::size_t CipherKeySize = 32;
     constexpr std::size_t HmacKeySize = 32;
     constexpr std::size_t HmacSize = CryptoPP::SHA256::DIGESTSIZE;
-    constexpr std::size_t HeaderSize = FileMagic.size() + sizeof(std::uint32_t) + SaltSize + IvSize;
+    constexpr std::size_t HeaderSize = FileMagic.size() + 1 + sizeof(std::uint32_t) + SaltSize + IvSize;
     constexpr std::size_t BufferSize = 64 * 1024;
     constexpr std::array<Byte, SaltSize> FixedKdfSalt = {
         0x42, 0x6C, 0x6F, 0x77, 0x66, 0x69, 0x73, 0x68,
@@ -53,12 +53,21 @@ namespace
 
     constexpr int KeyEditId = 1001;
     constexpr int FileStaticId = 1002;
+    constexpr int ModeComboId = 1003;
 
     enum class Mode
     {
         None,
         Encrypt,
         Decrypt
+    };
+
+    enum class CipherMode
+    {
+        Cbc = 0,
+        Cfb = 1,
+        Ofb = 2,
+        Ctr = 3
     };
 
     struct Options
@@ -68,9 +77,11 @@ namespace
         bool askKey = false;
         bool force = false;
         bool help = false;
+        bool autoCipherMode = false;
         fs::path inputPath;
         fs::path outputPath;
         std::wstring password;
+        std::optional<CipherMode> cipherMode;
     };
 
     struct KeyMaterial
@@ -81,6 +92,7 @@ namespace
 
     struct FileHeader
     {
+        CipherMode cipherMode = CipherMode::Cbc;
         std::uint32_t iterations = 0;
         std::array<Byte, SaltSize> salt = {};
         std::array<Byte, IvSize> iv = {};
@@ -91,7 +103,11 @@ namespace
         std::wstring title;
         std::wstring filePath;
         std::wstring password;
+        Mode operationMode = Mode::None;
+        std::optional<CipherMode> cipherMode;
+        bool autoCipherMode = false;
         HWND editHandle = nullptr;
+        HWND modeHandle = nullptr;
         bool accepted = false;
     };
 
@@ -182,6 +198,45 @@ namespace
         SetConsoleOutputCP(CP_UTF8);
     }
 
+    const char* cipherModeCliName(CipherMode mode)
+    {
+        switch (mode)
+        {
+            case CipherMode::Cbc:
+                return "cbc";
+            case CipherMode::Cfb:
+                return "cfb";
+            case CipherMode::Ofb:
+                return "ofb";
+            case CipherMode::Ctr:
+                return "ctr";
+        }
+
+        throw std::runtime_error("Unsupported cipher mode");
+    }
+
+    Byte encodeCipherMode(CipherMode mode)
+    {
+        return static_cast<Byte>(mode);
+    }
+
+    CipherMode decodeCipherMode(Byte value)
+    {
+        switch (value)
+        {
+            case static_cast<Byte>(CipherMode::Cbc):
+                return CipherMode::Cbc;
+            case static_cast<Byte>(CipherMode::Cfb):
+                return CipherMode::Cfb;
+            case static_cast<Byte>(CipherMode::Ofb):
+                return CipherMode::Ofb;
+            case static_cast<Byte>(CipherMode::Ctr):
+                return CipherMode::Ctr;
+            default:
+                throw std::runtime_error("Input file has unsupported cipher mode");
+        }
+    }
+
     /**
      * Добавляет 32-битное число в буфер в little-endian формате.
      */
@@ -222,6 +277,7 @@ namespace
      * Возвращает заголовок файла Blowfish.
      */
     std::vector<Byte> buildHeader(
+        CipherMode cipherMode,
         std::uint32_t iterations,
         const std::array<Byte, SaltSize>& salt,
         const std::array<Byte, IvSize>& iv)
@@ -230,6 +286,7 @@ namespace
         header.reserve(HeaderSize);
 
         header.insert(header.end(), FileMagic.begin(), FileMagic.end());
+        header.push_back(encodeCipherMode(cipherMode));
         appendUint32Le(header, iterations);
         header.insert(header.end(), salt.begin(), salt.end());
         header.insert(header.end(), iv.begin(), iv.end());
@@ -265,10 +322,14 @@ namespace
             throw std::runtime_error("Input file has unsupported format");
         }
 
+        Byte modeByte = 0;
+        readExact(input, &modeByte, sizeof(modeByte), "cipher mode");
+
         std::array<Byte, sizeof(std::uint32_t)> iterationBytes = {};
         readExact(input, iterationBytes.data(), iterationBytes.size(), "KDF iteration count");
 
         FileHeader header;
+        header.cipherMode = decodeCipherMode(modeByte);
         header.iterations = readUint32Le(iterationBytes);
 
         if (header.iterations == 0)
@@ -283,9 +344,9 @@ namespace
     }
 
     /**
-     * Читает заголовок файла Blowfish из указанного пути.
+     * Пытается прочитать заголовок нового формата Blowfish и возвращает nullopt для legacy-файлов.
      */
-    FileHeader readHeaderFromFile(const fs::path& inputPath)
+    std::optional<FileHeader> tryReadHeaderFromFile(const fs::path& inputPath)
     {
         std::ifstream input(inputPath, std::ios::binary);
         if (!input)
@@ -293,6 +354,21 @@ namespace
             throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
         }
 
+        std::array<Byte, FileMagic.size()> magic = {};
+        input.read(reinterpret_cast<char*>(magic.data()), static_cast<std::streamsize>(magic.size()));
+
+        if (input.gcount() != static_cast<std::streamsize>(magic.size()))
+        {
+            return std::nullopt;
+        }
+
+        if (magic != FileMagic)
+        {
+            return std::nullopt;
+        }
+
+        input.clear();
+        input.seekg(0, std::ios::beg);
         return readHeader(input);
     }
 
@@ -343,9 +419,9 @@ namespace
     }
 
     /**
-     * Производит IV из уже полученного ключевого материала.
+     * Производит IV для legacy-формата из уже полученного ключевого материала.
      */
-    std::array<Byte, IvSize> deriveIvFromKeyMaterial(const KeyMaterial& material)
+    std::array<Byte, IvSize> deriveLegacyIvFromKeyMaterial(const KeyMaterial& material)
     {
         std::array<Byte, IvSize> iv = {};
         std::copy_n(material.hmacKey.begin(), iv.size(), iv.begin());
@@ -603,20 +679,197 @@ namespace
     }
 
     /**
-     * Шифрует файл Blowfish-CBC и добавляет заголовок, salt, IV и HMAC-SHA256.
+     * Возвращает размер файла.
+     */
+    std::uintmax_t getFileSize(const fs::path& path)
+    {
+        std::error_code error;
+        const std::uintmax_t size = fs::file_size(path, error);
+        if (error)
+        {
+            throw std::runtime_error("Cannot read file size " + quotePath(path));
+        }
+
+        return size;
+    }
+
+    /**
+     * Пропускает данные через выбранное преобразование Crypto++.
+     */
+    template <typename Transformation>
+    void transformFileData(
+        std::ifstream& input,
+        std::ofstream& output,
+        Transformation& transformation,
+        bool usePadding,
+        HmacSha256* hmac,
+        std::optional<std::uintmax_t> bytesToRead = std::nullopt)
+    {
+        CryptoPP::StreamTransformationFilter filter(
+            transformation,
+            nullptr,
+            usePadding
+                ? CryptoPP::StreamTransformationFilter::DEFAULT_PADDING
+                : CryptoPP::StreamTransformationFilter::NO_PADDING);
+
+        std::array<Byte, BufferSize> inputBuffer = {};
+        std::uintmax_t remainingSize = bytesToRead.value_or(0);
+        const bool boundedRead = bytesToRead.has_value();
+
+        for (;;)
+        {
+            const std::size_t chunkSize = boundedRead
+                ? static_cast<std::size_t>(std::min<std::uintmax_t>(remainingSize, inputBuffer.size()))
+                : inputBuffer.size();
+
+            if (boundedRead && chunkSize == 0)
+            {
+                break;
+            }
+
+            input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(chunkSize));
+            const std::streamsize readSize = input.gcount();
+
+            if (readSize > 0)
+            {
+                filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
+                drainFilter(filter, output, hmac);
+
+                if (boundedRead)
+                {
+                    remainingSize -= static_cast<std::uintmax_t>(readSize);
+                }
+            }
+
+            if (boundedRead)
+            {
+                if (remainingSize == 0)
+                {
+                    break;
+                }
+
+                if (input.eof() || !input)
+                {
+                    throw std::runtime_error("Input file is truncated");
+                }
+            }
+            else
+            {
+                if (input.eof())
+                {
+                    break;
+                }
+
+                if (!input)
+                {
+                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
+                }
+            }
+        }
+
+        filter.MessageEnd();
+        drainFilter(filter, output, hmac);
+    }
+
+    template <typename Callback>
+    void withEncryptionTransformation(
+        CipherMode mode,
+        const KeyMaterial& keyMaterial,
+        const std::array<Byte, IvSize>& iv,
+        Callback&& callback)
+    {
+        switch (mode)
+        {
+            case CipherMode::Cbc:
+            {
+                CryptoPP::CBC_Mode<CryptoPP::Blowfish>::Encryption encryption;
+                encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(encryption, true);
+                return;
+            }
+            case CipherMode::Cfb:
+            {
+                CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Encryption encryption;
+                encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(encryption, false);
+                return;
+            }
+            case CipherMode::Ofb:
+            {
+                CryptoPP::OFB_Mode<CryptoPP::Blowfish>::Encryption encryption;
+                encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(encryption, false);
+                return;
+            }
+            case CipherMode::Ctr:
+            {
+                CryptoPP::CTR_Mode<CryptoPP::Blowfish>::Encryption encryption;
+                encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(encryption, false);
+                return;
+            }
+        }
+
+        throw std::runtime_error("Unsupported cipher mode");
+    }
+
+    template <typename Callback>
+    void withDecryptionTransformation(
+        CipherMode mode,
+        const KeyMaterial& keyMaterial,
+        const std::array<Byte, IvSize>& iv,
+        Callback&& callback)
+    {
+        switch (mode)
+        {
+            case CipherMode::Cbc:
+            {
+                CryptoPP::CBC_Mode<CryptoPP::Blowfish>::Decryption decryption;
+                decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(decryption, true);
+                return;
+            }
+            case CipherMode::Cfb:
+            {
+                CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Decryption decryption;
+                decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(decryption, false);
+                return;
+            }
+            case CipherMode::Ofb:
+            {
+                CryptoPP::OFB_Mode<CryptoPP::Blowfish>::Decryption decryption;
+                decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(decryption, false);
+                return;
+            }
+            case CipherMode::Ctr:
+            {
+                CryptoPP::CTR_Mode<CryptoPP::Blowfish>::Decryption decryption;
+                decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+                callback(decryption, false);
+                return;
+            }
+        }
+
+        throw std::runtime_error("Unsupported cipher mode");
+    }
+
+    /**
+     * Шифрует файл в новом self-describing формате: header + ciphertext + HMAC-SHA256.
      */
     void encryptFile(
         const fs::path& inputPath,
         const fs::path& outputPath,
         const std::wstring& password,
+        CipherMode cipherMode,
         bool force)
     {
         validateFilePaths(inputPath, outputPath, force);
-
         const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
-
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
-        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
+        const auto salt = randomBytes<SaltSize>();
+        const auto iv = randomBytes<IvSize>();
+        KeyMaterial keyMaterial = deriveKeyMaterial(password, salt, KdfIterations);
 
         try
         {
@@ -632,40 +885,23 @@ namespace
                 throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
             }
 
-            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Encryption encryption;
-            encryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
+            const std::vector<Byte> header = buildHeader(cipherMode, KdfIterations, salt, iv);
+            HmacSha256 hmac(keyMaterial.hmacKey);
 
-            CryptoPP::StreamTransformationFilter filter(
-                encryption,
-                nullptr,
-                CryptoPP::StreamTransformationFilter::NO_PADDING);
+            writeBytes(output, header.data(), header.size());
+            hmac.update(header.data(), header.size());
 
-            std::array<Byte, BufferSize> inputBuffer = {};
-
-            for (;;)
-            {
-                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(inputBuffer.size()));
-                const std::streamsize readSize = input.gcount();
-
-                if (readSize > 0)
+            withEncryptionTransformation(
+                cipherMode,
+                keyMaterial,
+                iv,
+                [&](auto& encryption, bool usePadding)
                 {
-                    filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
-                    drainFilter(filter, output, nullptr);
-                }
+                    transformFileData(input, output, encryption, usePadding, &hmac);
+                });
 
-                if (input.eof())
-                {
-                    break;
-                }
-
-                if (!input)
-                {
-                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
-                }
-            }
-
-            filter.MessageEnd();
-            drainFilter(filter, output, nullptr);
+            const auto finalHmac = hmac.final();
+            writeBytes(output, finalHmac.data(), finalHmac.size());
 
             output.close();
             if (!output)
@@ -685,25 +921,54 @@ namespace
     }
 
     /**
-     * Расшифровывает файл Blowfish после проверки HMAC-SHA256.
+     * Расшифровывает файл нового формата после проверки HMAC-SHA256.
      */
-    void decryptFile(
+    void decryptModernFile(
         const fs::path& inputPath,
         const fs::path& outputPath,
         const std::wstring& password,
+        const FileHeader& header,
+        const std::optional<CipherMode>& requestedMode,
         bool force)
     {
-        validateFilePaths(inputPath, outputPath, force);
-        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
-        const auto iv = deriveIvFromKeyMaterial(keyMaterial);
+        const std::uintmax_t fileSize = getFileSize(inputPath);
+        if (fileSize < HeaderSize + HmacSize)
+        {
+            throw std::runtime_error("Input file is too small");
+        }
+
+        if (requestedMode.has_value() && requestedMode.value() != header.cipherMode)
+        {
+            throw std::runtime_error(
+                "Selected mode does not match file header. Expected "
+                + std::string(cipherModeCliName(header.cipherMode)));
+        }
+
         const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
+        const std::uintmax_t ciphertextSize = fileSize - HeaderSize - HmacSize;
+        KeyMaterial keyMaterial = deriveKeyMaterial(password, header.salt, header.iterations);
 
         try
         {
+            const std::array<Byte, HmacSize> storedHmac = readStoredHmac(inputPath, fileSize - HmacSize);
+            const std::array<Byte, HmacSize> computedHmac =
+                computeFilePrefixHmac(inputPath, fileSize - HmacSize, keyMaterial.hmacKey);
+
+            if (!hmacEquals(storedHmac, computedHmac))
+            {
+                throw std::runtime_error("HMAC validation failed. Wrong key or damaged file");
+            }
+
             std::ifstream input(inputPath, std::ios::binary);
             if (!input)
             {
                 throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
+            }
+
+            input.seekg(static_cast<std::streamoff>(HeaderSize), std::ios::beg);
+            if (!input)
+            {
+                throw std::runtime_error("Cannot seek to ciphertext in input file");
             }
 
             std::ofstream output(temporaryPath, std::ios::binary);
@@ -712,40 +977,14 @@ namespace
                 throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
             }
 
-            CryptoPP::CFB_Mode<CryptoPP::Blowfish>::Decryption decryption;
-            decryption.SetKeyWithIV(keyMaterial.cipherKey.data(), keyMaterial.cipherKey.size(), iv.data(), iv.size());
-
-            CryptoPP::StreamTransformationFilter filter(
-                decryption,
-                nullptr,
-                CryptoPP::StreamTransformationFilter::NO_PADDING);
-
-            std::array<Byte, BufferSize> inputBuffer = {};
-
-            for (;;)
-            {
-                input.read(reinterpret_cast<char*>(inputBuffer.data()), static_cast<std::streamsize>(inputBuffer.size()));
-                const std::streamsize readSize = input.gcount();
-
-                if (readSize > 0)
+            withDecryptionTransformation(
+                header.cipherMode,
+                keyMaterial,
+                header.iv,
+                [&](auto& decryption, bool usePadding)
                 {
-                    filter.Put(inputBuffer.data(), static_cast<std::size_t>(readSize));
-                    drainFilter(filter, output, nullptr);
-                }
-
-                if (input.eof())
-                {
-                    break;
-                }
-
-                if (!input)
-                {
-                    throw std::runtime_error("Cannot read input file " + quotePath(inputPath));
-                }
-            }
-
-            filter.MessageEnd();
-            drainFilter(filter, output, nullptr);
+                    transformFileData(input, output, decryption, usePadding, nullptr, ciphertextSize);
+                });
 
             output.close();
             if (!output)
@@ -762,6 +1001,85 @@ namespace
             removeTemporaryOutput(temporaryPath);
             throw;
         }
+    }
+
+    /**
+     * Расшифровывает legacy-файл без заголовка и HMAC.
+     */
+    void decryptLegacyFile(
+        const fs::path& inputPath,
+        const fs::path& outputPath,
+        const std::wstring& password,
+        CipherMode cipherMode,
+        bool force)
+    {
+        const fs::path temporaryPath = prepareTemporaryOutputPath(outputPath, force);
+        KeyMaterial keyMaterial = deriveKeyMaterial(password, FixedKdfSalt, KdfIterations);
+        const auto iv = deriveLegacyIvFromKeyMaterial(keyMaterial);
+
+        try
+        {
+            std::ifstream input(inputPath, std::ios::binary);
+            if (!input)
+            {
+                throw std::runtime_error("Cannot open input file " + quotePath(inputPath));
+            }
+
+            std::ofstream output(temporaryPath, std::ios::binary);
+            if (!output)
+            {
+                throw std::runtime_error("Cannot create output file " + quotePath(temporaryPath));
+            }
+
+            withDecryptionTransformation(
+                cipherMode,
+                keyMaterial,
+                iv,
+                [&](auto& decryption, bool usePadding)
+                {
+                    transformFileData(input, output, decryption, usePadding, nullptr);
+                });
+
+            output.close();
+            if (!output)
+            {
+                throw std::runtime_error("Cannot finalize output file " + quotePath(temporaryPath));
+            }
+
+            finalizeTemporaryOutput(temporaryPath, outputPath, force);
+            clearKeyMaterial(keyMaterial);
+        }
+        catch (...)
+        {
+            clearKeyMaterial(keyMaterial);
+            removeTemporaryOutput(temporaryPath);
+            throw;
+        }
+    }
+
+    /**
+     * Расшифровывает файл Blowfish, автоматически выбирая новый или legacy-формат.
+     */
+    void decryptFile(
+        const fs::path& inputPath,
+        const fs::path& outputPath,
+        const std::wstring& password,
+        const std::optional<CipherMode>& requestedMode,
+        bool autoCipherMode,
+        bool force)
+    {
+        validateFilePaths(inputPath, outputPath, force);
+
+        const std::optional<FileHeader> header = tryReadHeaderFromFile(inputPath);
+        if (header.has_value())
+        {
+            decryptModernFile(inputPath, outputPath, password, header.value(), requestedMode, force);
+            return;
+        }
+
+        const CipherMode legacyMode = requestedMode.value_or(CipherMode::Cfb);
+        (void)autoCipherMode;
+        decryptLegacyFile(inputPath, outputPath, password, legacyMode, force);
     }
 
     /**
@@ -775,6 +1093,57 @@ namespace
         }
 
         options.mode = mode;
+    }
+
+    /**
+     * Разбирает строковое имя режима шифрования.
+     */
+    void setCipherModeFromArgument(Options& options, std::wstring_view rawValue)
+    {
+        std::wstring value(rawValue);
+        std::transform(
+            value.begin(),
+            value.end(),
+            value.begin(),
+            [](const wchar_t symbol)
+            {
+                return static_cast<wchar_t>(std::towlower(symbol));
+            });
+
+        options.autoCipherMode = false;
+
+        if (value == L"auto")
+        {
+            options.cipherMode.reset();
+            options.autoCipherMode = true;
+            return;
+        }
+
+        if (value == L"cbc")
+        {
+            options.cipherMode = CipherMode::Cbc;
+            return;
+        }
+
+        if (value == L"cfb")
+        {
+            options.cipherMode = CipherMode::Cfb;
+            return;
+        }
+
+        if (value == L"ofb")
+        {
+            options.cipherMode = CipherMode::Ofb;
+            return;
+        }
+
+        if (value == L"ctr")
+        {
+            options.cipherMode = CipherMode::Ctr;
+            return;
+        }
+
+        throw UsageError("Unsupported cipher mode. Use cbc, cfb, ofb, ctr or auto");
     }
 
     /**
@@ -838,6 +1207,10 @@ namespace
             {
                 options.password = nextArgument(index, argc, argv, argument);
             }
+            else if (argument == L"--mode" || argument == L"--cipher-mode")
+            {
+                setCipherModeFromArgument(options, nextArgument(index, argc, argv, argument));
+            }
             else if (argument == L"--ask-key")
             {
                 options.askKey = true;
@@ -863,22 +1236,26 @@ namespace
         std::wcout
             << L"Blowfish\n\n"
             << L"Шифрование:\n"
-            << L"  Blowfish.exe --encrypt --input <file> --ask-key\n"
-            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key>\n\n"
+            << L"  Blowfish.exe --encrypt --input <file> --ask-key --mode cbc\n"
+            << L"  Blowfish.exe --encrypt -i <file> -o <output> -k <key> --mode ctr\n\n"
             << L"Расшифрование:\n"
             << L"  Blowfish.exe --decrypt --input <file> --ask-key\n"
-            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key>\n\n"
+            << L"  Blowfish.exe --decrypt -i <file> -o <output> -k <key> --mode auto\n\n"
             << L"Выходной файл по умолчанию (если не указан --output):\n"
             << L"  encrypt + .zip  -> .pack\n"
             << L"  decrypt + .pack -> .zip\n"
             << L"  encrypt         -> <input>.bf\n"
             << L"  decrypt + .bf   -> убрать .bf\n"
             << L"  decrypt         -> <input>.ubf\n\n"
+            << L"Режимы шифрования:\n"
+            << L"  cbc (по умолчанию), cfb, ofb, ctr\n"
+            << L"  auto доступен только для расшифрования и читает режим из заголовка файла.\n\n"
             << L"Параметры:\n"
             << L"  --output    путь выходного файла (необязательно)\n"
             << L"  --force     перезаписывает существующий выходной файл\n"
             << L"  --ask-key   запрашивает ключ в консоли без вывода символов\n"
             << L"  --key       принимает ключ из аргумента командной строки\n"
+            << L"  --mode      режим шифрования: cbc|cfb|ofb|ctr|auto\n"
             << L"  --help      показывает эту справку\n";
     }
 
@@ -956,6 +1333,50 @@ namespace
         return handle;
     }
 
+    void addModeComboItem(HWND comboHandle, const wchar_t* text, LPARAM itemData)
+    {
+        const LRESULT itemIndex = SendMessageW(comboHandle, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text));
+        if (itemIndex == CB_ERR || itemIndex == CB_ERRSPACE)
+        {
+            throw std::runtime_error("Cannot populate mode combo box");
+        }
+
+        SendMessageW(comboHandle, CB_SETITEMDATA, static_cast<WPARAM>(itemIndex), itemData);
+    }
+
+    void initializeModeCombo(KeyDialogState& state)
+    {
+        if (state.modeHandle == nullptr)
+        {
+            throw std::runtime_error("Mode combo box is not created");
+        }
+
+        if (state.operationMode == Mode::Decrypt)
+        {
+            addModeComboItem(state.modeHandle, L"Auto (from file header)", -1);
+        }
+
+        addModeComboItem(state.modeHandle, L"CBC", static_cast<LPARAM>(CipherMode::Cbc));
+        addModeComboItem(state.modeHandle, L"CFB", static_cast<LPARAM>(CipherMode::Cfb));
+        addModeComboItem(state.modeHandle, L"OFB", static_cast<LPARAM>(CipherMode::Ofb));
+        addModeComboItem(state.modeHandle, L"CTR", static_cast<LPARAM>(CipherMode::Ctr));
+
+        int selectedIndex = 0;
+        if (state.operationMode == Mode::Decrypt && state.autoCipherMode)
+        {
+            selectedIndex = 0;
+        }
+        else
+        {
+            const CipherMode initialMode = state.cipherMode.value_or(CipherMode::Cbc);
+            selectedIndex = state.operationMode == Mode::Decrypt
+                ? static_cast<int>(initialMode) + 1
+                : static_cast<int>(initialMode);
+        }
+
+        SendMessageW(state.modeHandle, CB_SETCURSEL, static_cast<WPARAM>(selectedIndex), 0);
+    }
+
     /**
      * Обрабатывает сообщения окна ввода ключа.
      */
@@ -973,7 +1394,22 @@ namespace
 
                 createChildWindow(windowHandle, L"STATIC", L"Файл:", 0, 16, 16, 448, 18, FileStaticId);
                 createChildWindow(windowHandle, L"STATIC", state->filePath, SS_LEFTNOWORDWRAP, 16, 36, 448, 18, FileStaticId + 1);
-                createChildWindow(windowHandle, L"STATIC", L"Ключ:", 0, 16, 68, 448, 18, FileStaticId + 2);
+                createChildWindow(windowHandle, L"STATIC", L"Режим:", 0, 16, 68, 448, 18, FileStaticId + 2);
+
+                state->modeHandle = createChildWindow(
+                    windowHandle,
+                    L"COMBOBOX",
+                    L"",
+                    WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST,
+                    16,
+                    88,
+                    448,
+                    200,
+                    ModeComboId);
+
+                initializeModeCombo(*state);
+
+                createChildWindow(windowHandle, L"STATIC", L"Ключ:", 0, 16, 124, 448, 18, FileStaticId + 3);
 
                 state->editHandle = createChildWindow(
                     windowHandle,
@@ -981,15 +1417,15 @@ namespace
                     L"",
                     WS_BORDER | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL,
                     16,
-                    88,
+                    144,
                     448,
                     24,
                     KeyEditId);
 
                 SendMessageW(state->editHandle, EM_SETPASSWORDCHAR, L'*', 0);
 
-                createChildWindow(windowHandle, L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 272, 126, 90, 28, IDOK);
-                createChildWindow(windowHandle, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 374, 126, 90, 28, IDCANCEL);
+                createChildWindow(windowHandle, L"BUTTON", L"OK", WS_TABSTOP | BS_DEFPUSHBUTTON, 272, 182, 90, 28, IDOK);
+                createChildWindow(windowHandle, L"BUTTON", L"Cancel", WS_TABSTOP | BS_PUSHBUTTON, 374, 182, 90, 28, IDCANCEL);
 
                 SetFocus(state->editHandle);
                 return 0;
@@ -1001,7 +1437,7 @@ namespace
 
                 if (commandId == IDOK)
                 {
-                    if (state == nullptr || state->editHandle == nullptr)
+                    if (state == nullptr || state->editHandle == nullptr || state->modeHandle == nullptr)
                     {
                         DestroyWindow(windowHandle);
                         return 0;
@@ -1016,6 +1452,31 @@ namespace
                     {
                         MessageBoxW(windowHandle, L"Ключ не может быть пустым.", state->title.c_str(), MB_OK | MB_ICONERROR);
                         return 0;
+                    }
+
+                    const LRESULT selection = SendMessageW(state->modeHandle, CB_GETCURSEL, 0, 0);
+                    if (selection == CB_ERR)
+                    {
+                        MessageBoxW(windowHandle, L"Выберите режим шифрования.", state->title.c_str(), MB_OK | MB_ICONERROR);
+                        return 0;
+                    }
+
+                    const LRESULT itemData = SendMessageW(state->modeHandle, CB_GETITEMDATA, static_cast<WPARAM>(selection), 0);
+                    if (itemData == CB_ERR)
+                    {
+                        MessageBoxW(windowHandle, L"Невозможно определить выбранный режим.", state->title.c_str(), MB_OK | MB_ICONERROR);
+                        return 0;
+                    }
+
+                    if (itemData < 0)
+                    {
+                        state->autoCipherMode = true;
+                        state->cipherMode.reset();
+                    }
+                    else
+                    {
+                        state->autoCipherMode = false;
+                        state->cipherMode = static_cast<CipherMode>(itemData);
                     }
 
                     state->password = std::move(password);
@@ -1080,7 +1541,13 @@ namespace
     /**
      * Показывает модальное окно ввода ключа.
      */
-    bool promptPasswordWithDialog(const std::wstring& title, const fs::path& inputPath, std::wstring& password)
+    bool promptPasswordWithDialog(
+        const std::wstring& title,
+        const fs::path& inputPath,
+        Mode operationMode,
+        std::optional<CipherMode>& cipherMode,
+        bool& autoCipherMode,
+        std::wstring& password)
     {
         registerKeyDialogClass();
 
@@ -1088,13 +1555,16 @@ namespace
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &workArea, 0);
 
         constexpr int width = 500;
-        constexpr int height = 204;
+        constexpr int height = 260;
         const int x = workArea.left + ((workArea.right - workArea.left) - width) / 2;
         const int y = workArea.top + ((workArea.bottom - workArea.top) - height) / 2;
 
         KeyDialogState state;
         state.title = title;
         state.filePath = inputPath.wstring();
+        state.operationMode = operationMode;
+        state.cipherMode = cipherMode;
+        state.autoCipherMode = autoCipherMode;
 
         HWND windowHandle = CreateWindowExW(
             WS_EX_DLGMODALFRAME | WS_EX_TOPMOST,
@@ -1144,6 +1614,8 @@ namespace
         if (state.accepted)
         {
             password = std::move(state.password);
+            cipherMode = state.cipherMode;
+            autoCipherMode = state.autoCipherMode;
             return true;
         }
 
@@ -1237,22 +1709,32 @@ namespace
         const fs::path outputPath = makeAutomaticOutputPath(options.inputPath, options.mode);
 
         std::wstring password;
+        std::optional<CipherMode> cipherMode = options.cipherMode;
+        bool autoCipherMode = options.mode == Mode::Decrypt
+            ? (options.autoCipherMode || !options.cipherMode.has_value())
+            : false;
+
+        if (options.mode == Mode::Encrypt && !cipherMode.has_value())
+        {
+            cipherMode = CipherMode::Cbc;
+        }
+
         const std::wstring title = options.mode == Mode::Encrypt
             ? L"Blowfish Encrypt"
             : L"Blowfish Decrypt";
 
-        if (!promptPasswordWithDialog(title, options.inputPath, password))
+        if (!promptPasswordWithDialog(title, options.inputPath, options.mode, cipherMode, autoCipherMode, password))
         {
             return 2;
         }
 
         if (options.mode == Mode::Encrypt)
         {
-            encryptFile(options.inputPath, outputPath, password, false);
+            encryptFile(options.inputPath, outputPath, password, cipherMode.value_or(CipherMode::Cbc), false);
         }
         else
         {
-            decryptFile(options.inputPath, outputPath, password, false);
+            decryptFile(options.inputPath, outputPath, password, cipherMode, autoCipherMode, false);
         }
 
         SecureZeroMemory(password.data(), password.size() * sizeof(wchar_t));
@@ -1283,11 +1765,22 @@ namespace
 
         if (options.mode == Mode::Encrypt)
         {
-            encryptFile(options.inputPath, options.outputPath, options.password, options.force);
+            encryptFile(
+                options.inputPath,
+                options.outputPath,
+                options.password,
+                options.cipherMode.value_or(CipherMode::Cbc),
+                options.force);
         }
         else
         {
-            decryptFile(options.inputPath, options.outputPath, options.password, options.force);
+            decryptFile(
+                options.inputPath,
+                options.outputPath,
+                options.password,
+                options.cipherMode,
+                options.autoCipherMode,
+                options.force);
         }
 
         SecureZeroMemory(options.password.data(), options.password.size() * sizeof(wchar_t));
@@ -1310,6 +1803,11 @@ namespace
         if (options.mode == Mode::None)
         {
             throw UsageError("Mode is required: --encrypt or --decrypt");
+        }
+
+        if (options.mode == Mode::Encrypt && options.autoCipherMode)
+        {
+            throw UsageError("Mode auto is only available for decryption");
         }
 
         if (options.inputPath.empty())
